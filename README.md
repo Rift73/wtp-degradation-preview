@@ -28,7 +28,7 @@ A PySide6 GUI for real-time preview of image degradation pipelines used in super
 
 - Python 3.10+
 - Windows (bat scripts included; the Python code itself is cross-platform)
-- FFmpeg (optional, for video-based degradations)
+- FFmpeg (optional, for video-based degradations; must use shared build)
 - CUDA + Visual Studio Build Tools (optional, for GPU-accelerated degradations)
 
 ## Install
@@ -44,17 +44,6 @@ This creates a virtual environment and installs all dependencies from `requireme
 ```
 run.bat
 ```
-
-Or manually:
-```
-venv\Scripts\pythonw.exe main.pyw
-```
-
-1. Load an image (drag-and-drop or file picker)
-2. Add degradation stages from the panel
-3. Adjust parameters with sliders -- the preview updates in real-time
-4. Drag stages to reorder the pipeline
-5. Export the final config for use with [wtp_dataset_destroyer](https://github.com/the-database/wtp_dataset_destroyer)
 
 ## Project Structure
 
