@@ -39,27 +39,24 @@ class Color:
         Returns:
             tuple: A tuple containing the noisy low-quality image and the corresponding high-quality image.
         """
-        try:
-            if probability(self.probability):
-                return lq, hq
-            in_low = 0
-            in_high = 255
-            high_output = safe_randint(self.high_list)
-            low_output = safe_randint(self.low_list)
-            if low_output > high_output:
-                high_output = low_output + 10
-            gamma = safe_uniform(self.gamma)
-            lq = fast_color_level(
-                lq,
-                in_low=in_low,
-                in_high=in_high,
-                out_low=low_output,
-                out_high=high_output,
-                gamma=gamma,
-            )
-            logging.debug(
-                f"Color - low_output: {low_output} high_output: {high_output} gamma: {gamma}"
-            )
+        if probability(self.probability):
             return lq, hq
-        except Exception as e:
-            logging.error(f"Color error: {e}")
+        in_low = 0
+        in_high = 255
+        high_output = safe_randint(self.high_list)
+        low_output = safe_randint(self.low_list)
+        if low_output > high_output:
+            high_output = low_output + 10
+        gamma = safe_uniform(self.gamma)
+        lq = fast_color_level(
+            lq,
+            in_low=in_low,
+            in_high=in_high,
+            out_low=low_output,
+            out_high=high_output,
+            gamma=gamma,
+        )
+        logging.debug(
+            f"Color - low_output: {low_output} high_output: {high_output} gamma: {gamma}"
+        )
+        return lq, hq

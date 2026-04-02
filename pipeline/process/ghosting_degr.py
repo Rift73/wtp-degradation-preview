@@ -31,28 +31,24 @@ class Ghosting:
         self.probability = ghosting_dict.get("probability", 1.0)
 
     def run(self, lq: np.ndarray, hq: np.ndarray) -> tuple:
-        try:
-            if probability(self.probability):
-                return lq, hq
-            if lq.ndim == 2:
-                return lq, hq
-
-            if not (_HAS_GPU and torch.cuda.is_available()):
-                logging.warning("Ghosting requires CUDA — skipping")
-                return lq, hq
-
-            sx = int(np.random.randint(self.shift_x[0], self.shift_x[1] + 1))
-            sy = int(np.random.randint(self.shift_y[0], self.shift_y[1] + 1))
-            opacity = float(np.random.uniform(*self.opacity))
-
-            logging.debug(
-                f"Ghosting - shift: ({sx}, {sy}) opacity: {opacity:.2f}"
-            )
-
-            tensor = torch.from_numpy(lq.transpose(2, 0, 1)[None]).cuda()
-            result = temporal_ghosting_pt(tensor, sx, sy, opacity)
-            lq = result.squeeze(0).cpu().numpy().transpose(1, 2, 0)
-            return np.clip(lq, 0, 1).astype(np.float32), hq
-        except Exception as e:
-            logging.error(f"Ghosting error: {e}")
+        if probability(self.probability):
             return lq, hq
+        if lq.ndim == 2:
+            return lq, hq
+
+        if not (_HAS_GPU and torch.cuda.is_available()):
+            logging.warning("Ghosting requires CUDA — skipping")
+            return lq, hq
+
+        sx = int(np.random.randint(self.shift_x[0], self.shift_x[1] + 1))
+        sy = int(np.random.randint(self.shift_y[0], self.shift_y[1] + 1))
+        opacity = float(np.random.uniform(*self.opacity))
+
+        logging.debug(
+            f"Ghosting - shift: ({sx}, {sy}) opacity: {opacity:.2f}"
+        )
+
+        tensor = torch.from_numpy(lq.transpose(2, 0, 1)[None]).cuda()
+        result = temporal_ghosting_pt(tensor, sx, sy, opacity)
+        lq = result.squeeze(0).cpu().numpy().transpose(1, 2, 0)
+        return np.clip(lq, 0, 1).astype(np.float32), hq

@@ -37,32 +37,29 @@ class Pixelate:
         Returns:
             (np.ndarray, np.ndarray): A tuple containing the pixelated LQ image and the unchanged HQ image.
         """
-        try:
-            # Check if the pixelation should be applied based on the given probability.
-            if probability(self.probability):
-                return lq, hq
-
-            # Determine the shape of the input LQ image.
-            shape_img = lq.shape
-
-            # Select a pixel block size within the specified range.
-            pixel_size = safe_uniform(self.size_range)
-            if pixel_size <= 1:
-                return lq, hq
-
-            logging.debug(f"Pixelate - size: {pixel_size:.4f}")
-
-            # Apply the pixelation effect by resizing the image to a smaller size and then back to the original size.
-            lq = resize(
-                lq,
-                (int(shape_img[1] / pixel_size), int(shape_img[0] / pixel_size)),
-                ResizeFilter.Linear,
-                False,
-            )
-            lq = resize(
-                lq, (shape_img[1], shape_img[0]), ResizeFilter.Nearest, False
-            ).squeeze()
-
+        # Check if the pixelation should be applied based on the given probability.
+        if probability(self.probability):
             return lq, hq
-        except Exception as e:
-            logging.error(f"Pixelate error: {e}")
+
+        # Determine the shape of the input LQ image.
+        shape_img = lq.shape
+
+        # Select a pixel block size within the specified range.
+        pixel_size = safe_uniform(self.size_range)
+        if pixel_size <= 1:
+            return lq, hq
+
+        logging.debug(f"Pixelate - size: {pixel_size:.4f}")
+
+        # Apply the pixelation effect by resizing the image to a smaller size and then back to the original size.
+        lq = resize(
+            lq,
+            (int(shape_img[1] / pixel_size), int(shape_img[0] / pixel_size)),
+            ResizeFilter.Linear,
+            False,
+        )
+        lq = resize(
+            lq, (shape_img[1], shape_img[0]), ResizeFilter.Nearest, False
+        ).squeeze()
+
+        return lq, hq

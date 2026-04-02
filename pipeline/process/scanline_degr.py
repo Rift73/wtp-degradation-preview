@@ -29,33 +29,29 @@ class Scanline:
         self.probability = scanline_dict.get("probability", 1.0)
 
     def run(self, lq: np.ndarray, hq: np.ndarray) -> tuple:
-        try:
-            if probability(self.probability):
-                return lq, hq
-
-            if not (_HAS_GPU and torch.cuda.is_available()):
-                logging.warning("Scanline requires CUDA — skipping")
-                return lq, hq
-
-            strength = float(np.random.uniform(*self.strength))
-
-            logging.debug(
-                f"Scanline - strength: {strength:.2f} even: {self.even_lines}"
-            )
-
-            if lq.ndim == 2:
-                tensor = torch.from_numpy(lq[None, None]).cuda()
-            else:
-                tensor = torch.from_numpy(lq.transpose(2, 0, 1)[None]).cuda()
-
-            result = scanline_pt(tensor, strength, self.even_lines)
-
-            out = result.squeeze(0).cpu().numpy()
-            if lq.ndim == 2:
-                lq = out.squeeze(0).astype(np.float32)
-            else:
-                lq = out.transpose(1, 2, 0).astype(np.float32)
-            return np.clip(lq, 0, 1), hq
-        except Exception as e:
-            logging.error(f"Scanline error: {e}")
+        if probability(self.probability):
             return lq, hq
+
+        if not (_HAS_GPU and torch.cuda.is_available()):
+            logging.warning("Scanline requires CUDA — skipping")
+            return lq, hq
+
+        strength = float(np.random.uniform(*self.strength))
+
+        logging.debug(
+            f"Scanline - strength: {strength:.2f} even: {self.even_lines}"
+        )
+
+        if lq.ndim == 2:
+            tensor = torch.from_numpy(lq[None, None]).cuda()
+        else:
+            tensor = torch.from_numpy(lq.transpose(2, 0, 1)[None]).cuda()
+
+        result = scanline_pt(tensor, strength, self.even_lines)
+
+        out = result.squeeze(0).cpu().numpy()
+        if lq.ndim == 2:
+            lq = out.squeeze(0).astype(np.float32)
+        else:
+            lq = out.transpose(1, 2, 0).astype(np.float32)
+        return np.clip(lq, 0, 1), hq

@@ -1,4 +1,7 @@
 import os
+import logging
+import traceback
+from datetime import datetime
 
 from tqdm.contrib.concurrent import process_map, thread_map
 from ..process.utils import laplace_filter, lq_hq2grays, color_or_gray, img2gray
@@ -9,7 +12,25 @@ from os.path import join
 from tqdm import tqdm
 from ..utils.process import del_all_file
 from ..utils.registry import get_class
-import logging
+
+
+def _setup_logging(output_dir: str) -> str:
+    """Set up file logging to a logs/ directory. Returns the log file path."""
+    log_dir = join(output_dir, "logs")
+    os.makedirs(log_dir, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_path = join(log_dir, f"run_{timestamp}.log")
+
+    # Add file handler to root logger (won't duplicate if already set up)
+    file_handler = logging.FileHandler(log_path, mode="w", encoding="utf-8")
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(message)s",
+        datefmt="%H:%M:%S",
+    ))
+    logging.getLogger().addHandler(file_handler)
+    logging.getLogger().setLevel(logging.DEBUG)
+    return log_path
 
 
 class ImgProcess:
@@ -77,6 +98,7 @@ class ImgProcess:
         if config.get("size"):
             self.all_images = self.all_images[: config.get("size")]
         self.turn = []
+        self.turn_names = []
         self.output_lq = join(self.output, "lq")
         self.output_hq = join(self.output, "hq")
         self.map_type = config.get("map_type", "thread")
@@ -84,20 +106,25 @@ class ImgProcess:
         self.num_workers = config.get("num_workers")
         self.only_lq = config.get("only_lq", False)
         self.real_name = config.get("real_name")
+        self.failed_images = []
+
+        # Always set up file logging
+        self.log_path = _setup_logging(self.output)
+
         debug = config.get("debug")
         if debug:
             if not os.path.exists("debug"):
                 os.makedirs("debug")
-            logging.basicConfig(
-                level=logging.DEBUG,
-                filename="debug/debug.log",
-                filemode="w",
-                format="%(message)s",
-            )
+            # Also log to debug file for backwards compat
+            debug_handler = logging.FileHandler("debug/debug.log", mode="w")
+            debug_handler.setFormatter(logging.Formatter("%(message)s"))
+            logging.getLogger().addHandler(debug_handler)
             self.map_type = "for"
+
         for process_dict in process:
             process_type = process_dict["type"]
             self.turn.append(get_class(process_type)(process_dict))
+            self.turn_names.append(process_type)
         self.index_process = None
         if not os.path.exists(self.output_lq):
             os.makedirs(self.output_lq)
@@ -139,14 +166,11 @@ class ImgProcess:
 
         Args:
             img_fold (str): Filename of the image to process.
-
-        Raises:
-            IOError: If image reading or writing fails
-            ValueError: If image validation fails
-            RuntimeError: If processing pipeline fails
         """
+        step_name = "(before pipeline)"
         try:
             # Image reading with validation
+            step_name = "(image read)"
             img = self.__img_read(img_fold)
             # Laplace filter check
             if self.laplace_filter and laplace_filter(img, self.laplace_filter):
@@ -168,19 +192,28 @@ class ImgProcess:
                 output_name,
             )
 
-            # Process through pipeline with validation
-            for loss in self.turn:
+            # Process through pipeline
+            for step_name, loss in zip(self.turn_names, self.turn):
                 lq, hq = loss.run(lq, hq)
+
+            # Save only on success
             if self.only_lq:
                 self.__only_lq_save(lq, output_name)
             else:
                 self.__img_save(lq, hq, output_name)
-        except Exception as e:
-            logging.error("Processing failed for %s: %s", img_fold, str(e))
+        except Exception:
+            error_msg = (
+                f"FAILED: '{img_fold}' at step '{step_name}'\n"
+                f"{traceback.format_exc()}"
+            )
+            logging.error(error_msg)
+            self.failed_images.append((img_fold, step_name))
 
     def process_tile(self, img_fold: str) -> None:
         """Processes an image in tiles using the specified image processing techniques."""
+        step_name = "(before pipeline)"
         try:
+            step_name = "(image read)"
             img = self.__img_read(img_fold)
             h, w = img.shape[:2]
             index = self.all_images.index(img_fold)
@@ -211,31 +244,50 @@ class ImgProcess:
                     img_fold,
                     output_name,
                 )
-                for loss in self.turn:
+                for step_name, loss in zip(self.turn_names, self.turn):
                     lq, hq = loss.run(lq, hq)
                 if self.only_lq:
                     self.__only_lq_save(lq, output_name)
                 else:
                     self.__img_save(lq, hq, output_name)
 
-        except Exception as e:
-            logging.error("Processing failed for %s: %s", img_fold, str(e))
+        except Exception:
+            error_msg = (
+                f"FAILED: '{img_fold}' at step '{step_name}'\n"
+                f"{traceback.format_exc()}"
+            )
+            logging.error(error_msg)
+            self.failed_images.append((img_fold, step_name))
 
     def run(self):
         """Executes the image processing workflow."""
 
         process = self.process_tile if self.tile else self.process
-        try:
-            if self.map_type == "process":
-                process_map(
-                    process, self.all_images, max_workers=self.num_workers, chunksize=1
-                )
-            elif self.map_type == "thread":
-                thread_map(process, self.all_images, max_workers=self.num_workers)
-            else:
-                for img in tqdm(self.all_images):
-                    process(img)
 
-        except Exception as e:
-            logging.error(f"Processing failed: {str(e)}")
-            raise
+        if self.map_type == "process":
+            process_map(
+                process, self.all_images, max_workers=self.num_workers, chunksize=1
+            )
+        elif self.map_type == "thread":
+            thread_map(process, self.all_images, max_workers=self.num_workers)
+        else:
+            for img in tqdm(self.all_images):
+                process(img)
+
+        # Print failure summary
+        total = len(self.all_images)
+        failed = len(self.failed_images)
+        if failed > 0:
+            print(f"\n{'='*60}")
+            print(f" {failed}/{total} images FAILED during processing")
+            print(f" Full details in: {self.log_path}")
+            print(f"{'='*60}")
+            # Show first few failures as quick reference
+            for img_name, step in self.failed_images[:10]:
+                print(f"  - {img_name} (failed at: {step})")
+            if failed > 10:
+                print(f"  ... and {failed - 10} more (see log file)")
+            print()
+        else:
+            print(f"\nAll {total} images processed successfully.")
+            print(f"Log: {self.log_path}")

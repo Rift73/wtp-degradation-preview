@@ -54,41 +54,38 @@ class Canny:
         Returns:
             tuple: A tuple containing the processed low-quality image and the corresponding high-quality image.
         """
-        try:
-            if probability(self.probability):
-                return lq, hq
-            thread1 = np.random.choice(self.thread1_list)
-            thread2 = thread1 + np.random.choice(self.thread2_list)
-            aperture_size = np.random.choice(self.aperture_size)
-            if lq.ndim == 3:
-                gray = cv2.cvtColor(lq, cv2.COLOR_RGB2GRAY)
-            else:
-                gray = lq
-            lq_masc = (
-                1
-                - cv2.Canny(
-                    (gray * 255).astype(np.uint8),
-                    thread1,
-                    thread2,
-                    apertureSize=aperture_size,
-                    L2gradient=True,
-                )
-                // 255
-            )
-            if self.scale:
-                lq_masc = self.black_scale(
-                    lq_masc, np.random.choice(safe_arange(self.scale))
-                )
-            white = not probability(self.white)
-            if lq.ndim == 3:
-                lq = np.where(cv2.cvtColor(lq_masc, cv2.COLOR_GRAY2RGB), lq, white)
-            else:
-                lq = np.where(lq_masc, lq, white)
-            logging.debug(
-                f"Canny - thread1: {thread1} thread2: {thread2} aperture_size: {aperture_size} white: {bool(white)}",
-            )
-            if self.lq_hq:
-                hq = lq
+        if probability(self.probability):
             return lq, hq
-        except Exception as e:
-            logging.error(f"Canny error: {e}")
+        thread1 = np.random.choice(self.thread1_list)
+        thread2 = thread1 + np.random.choice(self.thread2_list)
+        aperture_size = np.random.choice(self.aperture_size)
+        if lq.ndim == 3:
+            gray = cv2.cvtColor(lq, cv2.COLOR_RGB2GRAY)
+        else:
+            gray = lq
+        lq_masc = (
+            1
+            - cv2.Canny(
+                (gray * 255).astype(np.uint8),
+                thread1,
+                thread2,
+                apertureSize=aperture_size,
+                L2gradient=True,
+            )
+            // 255
+        )
+        if self.scale:
+            lq_masc = self.black_scale(
+                lq_masc, np.random.choice(safe_arange(self.scale))
+            )
+        white = not probability(self.white)
+        if lq.ndim == 3:
+            lq = np.where(cv2.cvtColor(lq_masc, cv2.COLOR_GRAY2RGB), lq, white)
+        else:
+            lq = np.where(lq_masc, lq, white)
+        logging.debug(
+            f"Canny - thread1: {thread1} thread2: {thread2} aperture_size: {aperture_size} white: {bool(white)}",
+        )
+        if self.lq_hq:
+            hq = lq
+        return lq, hq

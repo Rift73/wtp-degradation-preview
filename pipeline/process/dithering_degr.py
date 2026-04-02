@@ -107,34 +107,31 @@ class Dithering:
             "riemersma": self.__riemersma,
             "quantize": self.__quantize,
         }
-        try:
-            if probability(self.probability):
-                return lq, hq
-            self.dithering_type = random.choice(self.dithering_type_list)
-            self.unif_quantiz = safe_randint(self.quantize)
+        if probability(self.probability):
+            return lq, hq
+        self.dithering_type = random.choice(self.dithering_type_list)
+        self.unif_quantiz = safe_randint(self.quantize)
 
-            # GPU path for quantize and ordered dither
-            if _HAS_GPU_DITHER and torch.cuda.is_available() and self.dithering_type in _GPU_DITHER_TYPES:
-                if lq.ndim == 2:
-                    tensor = torch.from_numpy(lq[None, None]).cuda()
-                else:
-                    tensor = torch.from_numpy(lq.transpose(2, 0, 1)[None]).cuda()
+        # GPU path for quantize and ordered dither
+        if _HAS_GPU_DITHER and torch.cuda.is_available() and self.dithering_type in _GPU_DITHER_TYPES:
+            if lq.ndim == 2:
+                tensor = torch.from_numpy(lq[None, None]).cuda()
+            else:
+                tensor = torch.from_numpy(lq.transpose(2, 0, 1)[None]).cuda()
 
-                if self.dithering_type == "quantize":
-                    result = quantize_pt(tensor, self.unif_quantiz)
-                else:  # "order"
-                    map_sz = random.choice(self.map_size) if isinstance(self.map_size, list) else self.map_size
-                    result = ordered_dither_pt(tensor, self.unif_quantiz, int(map_sz))
+            if self.dithering_type == "quantize":
+                result = quantize_pt(tensor, self.unif_quantiz)
+            else:  # "order"
+                map_sz = random.choice(self.map_size) if isinstance(self.map_size, list) else self.map_size
+                result = ordered_dither_pt(tensor, self.unif_quantiz, int(map_sz))
 
-                out = result.squeeze(0).cpu().numpy()
-                if lq.ndim == 2:
-                    lq = out.squeeze(0).astype(np.float32)
-                else:
-                    lq = out.transpose(1, 2, 0).astype(np.float32)
-                return np.squeeze(lq), hq
-
-            # CPU fallback (exact error diffusion, riemersma)
-            lq = DITHERING_TYPE_MAP[self.dithering_type](lq, UQ(self.unif_quantiz))
+            out = result.squeeze(0).cpu().numpy()
+            if lq.ndim == 2:
+                lq = out.squeeze(0).astype(np.float32)
+            else:
+                lq = out.transpose(1, 2, 0).astype(np.float32)
             return np.squeeze(lq), hq
-        except Exception as e:
-            logging.error(f"Dithering error: {e}")
+
+        # CPU fallback (exact error diffusion, riemersma)
+        lq = DITHERING_TYPE_MAP[self.dithering_type](lq, UQ(self.unif_quantiz))
+        return np.squeeze(lq), hq

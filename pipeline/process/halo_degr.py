@@ -121,17 +121,14 @@ class Halo:
         Returns:
             tuple: A tuple containing the halo loss reduced low-quality image and the corresponding high-quality image.
         """
-        try:
-            if probability(self.probability):
-                return lq, hq
-            type_halo = np.random.choice(self.type)
-            if type_halo == "unsharp_mask":
-                lq = self.__unsharp_mask(lq)
-            elif type_halo == "unsharp_gray":
-                lq = self.__unsharp_gray(lq)
-            else:
-                lq = self.__unsharp_halo(lq)
-
+        if probability(self.probability):
             return lq, hq
-        except Exception as e:
-            logging.error("Halo error: %s", e)
+        type_halo = np.random.choice(self.type)
+        if type_halo == "unsharp_mask":
+            lq = self.__unsharp_mask(lq)
+        elif type_halo == "unsharp_gray":
+            lq = self.__unsharp_gray(lq)
+        else:
+            lq = self.__unsharp_halo(lq)
+
+        return lq, hq

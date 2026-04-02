@@ -37,59 +37,55 @@ class Lowpass:
         self.mask_lines_brz = lowpass_dict.get("mask_lines_brz", 0.08)
 
     def run(self, lq: np.ndarray, hq: np.ndarray) -> tuple:
-        try:
-            if probability(self.probability):
-                return lq, hq
-
-            if not (_HAS_GPU_LOWPASS and torch.cuda.is_available()):
-                logging.warning("Lowpass requires CUDA — skipping")
-                return lq, hq
-
-            cutoff = float(np.random.uniform(*self.cutoff))
-            order = int(np.random.randint(self.order[0], self.order[1] + 1))
-
-            logging.debug(f"Lowpass - cutoff: {cutoff:.3f} order: {order}")
-
-            # Keep original for detail mask blending
-            original_lq = lq.copy() if self.detail_mask else None
-
-            if lq.ndim == 2:
-                tensor = torch.from_numpy(lq[None, None]).cuda()
-            else:
-                tensor = torch.from_numpy(lq.transpose(2, 0, 1)[None]).cuda()
-
-            result = lowpass_filter_pt(tensor, cutoff, order)
-
-            out = result.squeeze(0).cpu().numpy()
-            if lq.ndim == 2:
-                filtered = out.squeeze(0).astype(np.float32)
-            else:
-                filtered = out.transpose(1, 2, 0).astype(np.float32)
-            filtered = np.clip(filtered, 0, 1)
-
-            # Detail mask: protect edges/detail, only lowpass flat areas
-            if self.detail_mask and original_lq is not None:
-                # Compute mask from HQ using PyTorch detail_mask_neo
-                if hq.ndim == 2:
-                    hq_tensor = torch.from_numpy(np.repeat(hq[None, None], 3, axis=1)).cuda()
-                else:
-                    hq_tensor = torch.from_numpy(hq.transpose(2, 0, 1)[None]).cuda()
-
-                mask_tensor = detail_mask_neo_pt(
-                    hq_tensor, lines_brz=self.mask_lines_brz,
-                )  # (1, 1, H, W)
-
-                mask = mask_tensor.squeeze(0).squeeze(0).cpu().numpy()  # (H, W)
-                if original_lq.ndim == 3:
-                    mask = mask[:, :, None]
-                filtered = mask * original_lq + (1.0 - mask) * filtered
-
-                logging.debug(
-                    "Lowpass detail mask - coverage: %.1f%%",
-                    float(np.mean(mask > 0)) * 100,
-                )
-
-            return filtered, hq
-        except Exception as e:
-            logging.error(f"Lowpass error: {e}")
+        if probability(self.probability):
             return lq, hq
+
+        if not (_HAS_GPU_LOWPASS and torch.cuda.is_available()):
+            logging.warning("Lowpass requires CUDA — skipping")
+            return lq, hq
+
+        cutoff = float(np.random.uniform(*self.cutoff))
+        order = int(np.random.randint(self.order[0], self.order[1] + 1))
+
+        logging.debug(f"Lowpass - cutoff: {cutoff:.3f} order: {order}")
+
+        # Keep original for detail mask blending
+        original_lq = lq.copy() if self.detail_mask else None
+
+        if lq.ndim == 2:
+            tensor = torch.from_numpy(lq[None, None]).cuda()
+        else:
+            tensor = torch.from_numpy(lq.transpose(2, 0, 1)[None]).cuda()
+
+        result = lowpass_filter_pt(tensor, cutoff, order)
+
+        out = result.squeeze(0).cpu().numpy()
+        if lq.ndim == 2:
+            filtered = out.squeeze(0).astype(np.float32)
+        else:
+            filtered = out.transpose(1, 2, 0).astype(np.float32)
+        filtered = np.clip(filtered, 0, 1)
+
+        # Detail mask: protect edges/detail, only lowpass flat areas
+        if self.detail_mask and original_lq is not None:
+            # Compute mask from HQ using PyTorch detail_mask_neo
+            if hq.ndim == 2:
+                hq_tensor = torch.from_numpy(np.repeat(hq[None, None], 3, axis=1)).cuda()
+            else:
+                hq_tensor = torch.from_numpy(hq.transpose(2, 0, 1)[None]).cuda()
+
+            mask_tensor = detail_mask_neo_pt(
+                hq_tensor, lines_brz=self.mask_lines_brz,
+            )  # (1, 1, H, W)
+
+            mask = mask_tensor.squeeze(0).squeeze(0).cpu().numpy()  # (H, W)
+            if original_lq.ndim == 3:
+                mask = mask[:, :, None]
+            filtered = mask * original_lq + (1.0 - mask) * filtered
+
+            logging.debug(
+                "Lowpass detail mask - coverage: %.1f%%",
+                float(np.mean(mask > 0)) * 100,
+            )
+
+        return filtered, hq

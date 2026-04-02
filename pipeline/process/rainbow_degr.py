@@ -37,33 +37,29 @@ class Rainbow:
         self.probability = rainbow_dict.get("probability", 1.0)
 
     def run(self, lq: np.ndarray, hq: np.ndarray) -> tuple:
-        try:
-            if probability(self.probability):
-                return lq, hq
-            if lq.ndim == 2:
-                return lq, hq
-
-            if not (_HAS_GPU_RAINBOW and torch.cuda.is_available()):
-                logging.warning("Rainbow requires CUDA — skipping")
-                return lq, hq
-
-            freq = float(np.random.uniform(*self.subcarrier_freq))
-            bw = float(np.random.uniform(*self.chroma_bandwidth))
-            intensity = float(np.random.uniform(*self.intensity))
-            phase_offset = float(np.random.uniform(0, 2 * np.pi))
-
-            logging.debug(
-                f"Rainbow - freq: {freq:.3f} bw: {bw:.3f} "
-                f"intensity: {intensity:.2f} phase: {phase_offset:.2f}"
-            )
-
-            tensor = torch.from_numpy(lq.transpose(2, 0, 1)[None]).cuda()
-            result = composite_rainbow_pt(
-                tensor, freq, bw, intensity,
-                self.phase_alternation, phase_offset,
-            )
-            lq = result.squeeze(0).cpu().numpy().transpose(1, 2, 0)
-            return np.clip(lq, 0, 1).astype(np.float32), hq
-        except Exception as e:
-            logging.error(f"Rainbow error: {e}")
+        if probability(self.probability):
             return lq, hq
+        if lq.ndim == 2:
+            return lq, hq
+
+        if not (_HAS_GPU_RAINBOW and torch.cuda.is_available()):
+            logging.warning("Rainbow requires CUDA — skipping")
+            return lq, hq
+
+        freq = float(np.random.uniform(*self.subcarrier_freq))
+        bw = float(np.random.uniform(*self.chroma_bandwidth))
+        intensity = float(np.random.uniform(*self.intensity))
+        phase_offset = float(np.random.uniform(0, 2 * np.pi))
+
+        logging.debug(
+            f"Rainbow - freq: {freq:.3f} bw: {bw:.3f} "
+            f"intensity: {intensity:.2f} phase: {phase_offset:.2f}"
+        )
+
+        tensor = torch.from_numpy(lq.transpose(2, 0, 1)[None]).cuda()
+        result = composite_rainbow_pt(
+            tensor, freq, bw, intensity,
+            self.phase_alternation, phase_offset,
+        )
+        lq = result.squeeze(0).cpu().numpy().transpose(1, 2, 0)
+        return np.clip(lq, 0, 1).astype(np.float32), hq

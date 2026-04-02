@@ -123,57 +123,54 @@ class Subsampling:
         Returns:
             tuple: Modified low-quality image and the original high-quality image.
         """
-        try:
-            if lq.ndim == 2 or lq.shape[2] == 1 or probability(self.probability):
-                return lq, hq
-
-            # Sample parameters
-            ycbcr_key = random.choice(self.ycbcr_type)
-            down_alg_name = choice(self.down_alg)
-            up_alg_name = choice(self.up_alg)
-            format_str = random.choice(self.format_list)
-            blur_sigma = safe_uniform(self.blur_kernels) if self.blur_kernels else None
-            if blur_sigma == 0.0:
-                blur_sigma = None
-
-            # Map YUV key: "601"→"601", "709"→"709", etc.
-            logging.debug(
-                f"Subsampling: format={format_str} down={down_alg_name} up={up_alg_name} yuv={ycbcr_key} blur={blur_sigma}"
-            )
-
-            # GPU path
-            if _HAS_GPU_SUBSAMPLE and torch.cuda.is_available():
-                tensor = torch.from_numpy(lq.transpose(2, 0, 1)[None]).cuda()
-                result = chroma_subsample_pt(
-                    tensor, down_alg_name, up_alg_name, format_str, blur_sigma, ycbcr_key
-                )
-                lq = result.squeeze(0).cpu().numpy().transpose(1, 2, 0)
-                return np.clip(lq, 0, 1).astype(np.float32), hq
-
-            # CPU fallback
-            yuv = YUV_MAP[ycbcr_key]
-            lq = colour.RGB_to_YCbCr(
-                lq, in_bits=8, K=colour.models.rgb.ycbcr.WEIGHTS_YCBCR[yuv]
-            ).astype(np.float32)
-
-            lq = self.__sample(lq)
-            if blur_sigma is not None:
-                lq[..., 1] = cv.GaussianBlur(
-                    lq[..., 1], (0, 0), sigmaX=blur_sigma, sigmaY=blur_sigma,
-                    borderType=cv.BORDER_REFLECT,
-                )
-                lq[..., 2] = cv.GaussianBlur(
-                    lq[..., 2], (0, 0), sigmaX=blur_sigma, sigmaY=blur_sigma,
-                    borderType=cv.BORDER_REFLECT,
-                )
-            lq = (
-                colour.YCbCr_to_RGB(
-                    lq, in_bits=8, out_bits=8,
-                    K=colour.models.rgb.ycbcr.WEIGHTS_YCBCR[yuv],
-                )
-                .astype(np.float32)
-                .clip(0, 1)
-            )
+        if lq.ndim == 2 or lq.shape[2] == 1 or probability(self.probability):
             return lq, hq
-        except Exception as e:
-            logging.error(f"Subsampling Error: {e}")
+
+        # Sample parameters
+        ycbcr_key = random.choice(self.ycbcr_type)
+        down_alg_name = choice(self.down_alg)
+        up_alg_name = choice(self.up_alg)
+        format_str = random.choice(self.format_list)
+        blur_sigma = safe_uniform(self.blur_kernels) if self.blur_kernels else None
+        if blur_sigma == 0.0:
+            blur_sigma = None
+
+        # Map YUV key: "601"→"601", "709"→"709", etc.
+        logging.debug(
+            f"Subsampling: format={format_str} down={down_alg_name} up={up_alg_name} yuv={ycbcr_key} blur={blur_sigma}"
+        )
+
+        # GPU path
+        if _HAS_GPU_SUBSAMPLE and torch.cuda.is_available():
+            tensor = torch.from_numpy(lq.transpose(2, 0, 1)[None]).cuda()
+            result = chroma_subsample_pt(
+                tensor, down_alg_name, up_alg_name, format_str, blur_sigma, ycbcr_key
+            )
+            lq = result.squeeze(0).cpu().numpy().transpose(1, 2, 0)
+            return np.clip(lq, 0, 1).astype(np.float32), hq
+
+        # CPU fallback
+        yuv = YUV_MAP[ycbcr_key]
+        lq = colour.RGB_to_YCbCr(
+            lq, in_bits=8, K=colour.models.rgb.ycbcr.WEIGHTS_YCBCR[yuv]
+        ).astype(np.float32)
+
+        lq = self.__sample(lq)
+        if blur_sigma is not None:
+            lq[..., 1] = cv.GaussianBlur(
+                lq[..., 1], (0, 0), sigmaX=blur_sigma, sigmaY=blur_sigma,
+                borderType=cv.BORDER_REFLECT,
+            )
+            lq[..., 2] = cv.GaussianBlur(
+                lq[..., 2], (0, 0), sigmaX=blur_sigma, sigmaY=blur_sigma,
+                borderType=cv.BORDER_REFLECT,
+            )
+        lq = (
+            colour.YCbCr_to_RGB(
+                lq, in_bits=8, out_bits=8,
+                K=colour.models.rgb.ycbcr.WEIGHTS_YCBCR[yuv],
+            )
+            .astype(np.float32)
+            .clip(0, 1)
+        )
+        return lq, hq

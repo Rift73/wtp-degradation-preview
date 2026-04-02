@@ -387,26 +387,23 @@ class Compress:
             "mpeg4": self.__mpeg4,
             "vp9": self.__vp9,
         }
-        try:
-            if probability(self.probability):
-                return lq, hq
-            gray = False
-            if lq.ndim == 3 and lq.shape[2] == 3:
-                lq = (lq * 255.0).astype(np.uint8)
-                lq = cv.cvtColor(lq, cv.COLOR_RGB2BGR)
-            else:
-                lq = cv.cvtColor((lq * 255.0).astype(np.uint8), cv.COLOR_GRAY2BGR)
-                gray = True
+        if probability(self.probability):
+            return lq, hq
+        gray = False
+        if lq.ndim == 3 and lq.shape[2] == 3:
+            lq = (lq * 255.0).astype(np.uint8)
+            lq = cv.cvtColor(lq, cv.COLOR_RGB2BGR)
+        else:
+            lq = cv.cvtColor((lq * 255.0).astype(np.uint8), cv.COLOR_GRAY2BGR)
+            gray = True
 
-            algorithm = random.choice(self.algorithm)
-            random_comp = safe_randint(self.target_compress[algorithm])
-            logging.debug(f"Compress - algorithm: {algorithm} compress: {random_comp}")
-            lq = COMPRESS_TYPE_MAP[algorithm](lq, random_comp)
+        algorithm = random.choice(self.algorithm)
+        random_comp = safe_randint(self.target_compress[algorithm])
+        logging.debug(f"Compress - algorithm: {algorithm} compress: {random_comp}")
+        lq = COMPRESS_TYPE_MAP[algorithm](lq, random_comp)
 
-            if gray:
-                lq = cv.cvtColor(lq, cv.COLOR_BGR2GRAY)
-            else:
-                lq = cv.cvtColor(lq, cv.COLOR_BGR2RGB)
-            return lq.astype(np.float32) / 255.0, hq
-        except Exception as e:
-            logging.error(f"Compress error: {e}")
+        if gray:
+            lq = cv.cvtColor(lq, cv.COLOR_BGR2GRAY)
+        else:
+            lq = cv.cvtColor(lq, cv.COLOR_BGR2RGB)
+        return lq.astype(np.float32) / 255.0, hq

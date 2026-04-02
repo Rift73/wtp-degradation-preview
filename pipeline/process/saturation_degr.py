@@ -34,18 +34,15 @@ class Saturation:
         Returns:
             Tuple of numpy.ndarrays: Image with adjusted saturation and original high quality image.
         """
-        try:
-            if lq.ndim == 2:
-                return lq, hq
-            if probability(self.probability):
-                return lq, hq
-            random_saturation = safe_uniform(self.rand)
-            logging.debug(f"Saturation - {random_saturation:.4f}")
-            hsv_image = cv.cvtColor(lq, cv.COLOR_RGB2HSV)
-            decreased_saturation = hsv_image.copy()
-            decreased_saturation[:, :, 1] = (
-                decreased_saturation[:, :, 1] * random_saturation
-            )
-            return cv.cvtColor(decreased_saturation, cv.COLOR_HSV2RGB), hq
-        except Exception as e:
-            logging.error(f"Saturation error: {e}")
+        if lq.ndim == 2:
+            return lq, hq
+        if probability(self.probability):
+            return lq, hq
+        random_saturation = safe_uniform(self.rand)
+        logging.debug(f"Saturation - {random_saturation:.4f}")
+        hsv_image = cv.cvtColor(lq, cv.COLOR_RGB2HSV)
+        decreased_saturation = hsv_image.copy()
+        decreased_saturation[:, :, 1] = (
+            decreased_saturation[:, :, 1] * random_saturation
+        )
+        return cv.cvtColor(decreased_saturation, cv.COLOR_HSV2RGB), hq

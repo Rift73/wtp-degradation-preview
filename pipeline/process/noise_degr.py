@@ -277,62 +277,59 @@ class Noise:
             "pepper": self.__pepper,
             "salt_and_pepper": self.__salt_and_pepper,
         }
-        try:
-            if probability(self.probability):
-                return lq, hq
-            y = False
-            uv = False
-            if lq.ndim == 3:
-                if not probability(self.y_noise):
-                    y = True
-                    yuv_img = colour.RGB_to_YCbCr(
-                lq, in_bits=8, K=colour.models.rgb.ycbcr.WEIGHTS_YCBCR["ITU-R BT.2020"]
-            ).astype(np.float32)
-                    lq = yuv_img[:, :, 0]
-                    uv_array = yuv_img[:, :, 1:]
-                    self.default_debug = "Noise - color_type: y"
-                elif not probability(self.uv_noise):
-                    uv = True
-                    yuv_img = colour.RGB_to_YCbCr(
-                lq, in_bits=8, K=colour.models.rgb.ycbcr.WEIGHTS_YCBCR["ITU-R BT.2020"]
-            ).astype(np.float32)
-                    lq = yuv_img[:, :, 1:]
-                    y_array = yuv_img[:, :, 0]
-                    self.default_debug = "Noise - color_type: uv"
-                else:
-                    self.default_debug = "Noise - color_type: rgb"
-
-            self.noise_type = np.random.choice(self.type_noise)
-            lq = NOISE_TYPE_MAP[self.noise_type](lq)
-            if y:
-                lq = np.stack((lq, uv_array[:, :, 0], uv_array[:, :, 1]), axis=-1)
-                lq = (
-                colour.YCbCr_to_RGB(
-                    lq,
-                    in_bits=8,
-                    out_bits=8,
-                    K=colour.models.rgb.ycbcr.WEIGHTS_YCBCR["ITU-R BT.2020"],
-                )
-                .astype(np.float32)
-                .clip(0, 1)
-            )
-            elif uv:
-                lq = np.stack((y_array, lq[:, :, 0], lq[:, :, 1]), axis=-1)
-                lq = (
-                colour.YCbCr_to_RGB(
-                    lq,
-                    in_bits=8,
-                    out_bits=8,
-                    K=colour.models.rgb.ycbcr.WEIGHTS_YCBCR["ITU-R BT.2020"],
-                )
-                .astype(np.float32)
-                .clip(0, 1)
-            )
-            else:
-                lq = lq.clip(0, 1)
-
-            if self.lqhq:
-                hq = lq
+        if probability(self.probability):
             return lq, hq
-        except Exception as e:
-            logging.error(f"Noise error: {e}")
+        y = False
+        uv = False
+        if lq.ndim == 3:
+            if not probability(self.y_noise):
+                y = True
+                yuv_img = colour.RGB_to_YCbCr(
+            lq, in_bits=8, K=colour.models.rgb.ycbcr.WEIGHTS_YCBCR["ITU-R BT.2020"]
+        ).astype(np.float32)
+                lq = yuv_img[:, :, 0]
+                uv_array = yuv_img[:, :, 1:]
+                self.default_debug = "Noise - color_type: y"
+            elif not probability(self.uv_noise):
+                uv = True
+                yuv_img = colour.RGB_to_YCbCr(
+            lq, in_bits=8, K=colour.models.rgb.ycbcr.WEIGHTS_YCBCR["ITU-R BT.2020"]
+        ).astype(np.float32)
+                lq = yuv_img[:, :, 1:]
+                y_array = yuv_img[:, :, 0]
+                self.default_debug = "Noise - color_type: uv"
+            else:
+                self.default_debug = "Noise - color_type: rgb"
+
+        self.noise_type = np.random.choice(self.type_noise)
+        lq = NOISE_TYPE_MAP[self.noise_type](lq)
+        if y:
+            lq = np.stack((lq, uv_array[:, :, 0], uv_array[:, :, 1]), axis=-1)
+            lq = (
+            colour.YCbCr_to_RGB(
+                lq,
+                in_bits=8,
+                out_bits=8,
+                K=colour.models.rgb.ycbcr.WEIGHTS_YCBCR["ITU-R BT.2020"],
+            )
+            .astype(np.float32)
+            .clip(0, 1)
+        )
+        elif uv:
+            lq = np.stack((y_array, lq[:, :, 0], lq[:, :, 1]), axis=-1)
+            lq = (
+            colour.YCbCr_to_RGB(
+                lq,
+                in_bits=8,
+                out_bits=8,
+                K=colour.models.rgb.ycbcr.WEIGHTS_YCBCR["ITU-R BT.2020"],
+            )
+            .astype(np.float32)
+            .clip(0, 1)
+        )
+        else:
+            lq = lq.clip(0, 1)
+
+        if self.lqhq:
+            hq = lq
+        return lq, hq

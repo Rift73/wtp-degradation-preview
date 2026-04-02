@@ -31,36 +31,32 @@ class FilmGrain:
         self.probability = filmgrain_dict.get("probability", 1.0)
 
     def run(self, lq: np.ndarray, hq: np.ndarray) -> tuple:
-        try:
-            if probability(self.probability):
-                return lq, hq
-
-            if not (_HAS_GPU and torch.cuda.is_available()):
-                logging.warning("FilmGrain requires CUDA — skipping")
-                return lq, hq
-
-            intensity = float(np.random.uniform(*self.intensity))
-            grain_size = float(np.random.uniform(*self.grain_size))
-            midtone = float(np.random.uniform(*self.midtone_bias))
-
-            logging.debug(
-                f"FilmGrain - intensity: {intensity:.3f} size: {grain_size:.1f} "
-                f"midtone: {midtone:.2f}"
-            )
-
-            if lq.ndim == 2:
-                tensor = torch.from_numpy(lq[None, None]).cuda()
-            else:
-                tensor = torch.from_numpy(lq.transpose(2, 0, 1)[None]).cuda()
-
-            result = film_grain_pt(tensor, intensity, grain_size, midtone)
-
-            out = result.squeeze(0).cpu().numpy()
-            if lq.ndim == 2:
-                lq = out.squeeze(0).astype(np.float32)
-            else:
-                lq = out.transpose(1, 2, 0).astype(np.float32)
-            return np.clip(lq, 0, 1), hq
-        except Exception as e:
-            logging.error(f"FilmGrain error: {e}")
+        if probability(self.probability):
             return lq, hq
+
+        if not (_HAS_GPU and torch.cuda.is_available()):
+            logging.warning("FilmGrain requires CUDA — skipping")
+            return lq, hq
+
+        intensity = float(np.random.uniform(*self.intensity))
+        grain_size = float(np.random.uniform(*self.grain_size))
+        midtone = float(np.random.uniform(*self.midtone_bias))
+
+        logging.debug(
+            f"FilmGrain - intensity: {intensity:.3f} size: {grain_size:.1f} "
+            f"midtone: {midtone:.2f}"
+        )
+
+        if lq.ndim == 2:
+            tensor = torch.from_numpy(lq[None, None]).cuda()
+        else:
+            tensor = torch.from_numpy(lq.transpose(2, 0, 1)[None]).cuda()
+
+        result = film_grain_pt(tensor, intensity, grain_size, midtone)
+
+        out = result.squeeze(0).cpu().numpy()
+        if lq.ndim == 2:
+            lq = out.squeeze(0).astype(np.float32)
+        else:
+            lq = out.transpose(1, 2, 0).astype(np.float32)
+        return np.clip(lq, 0, 1), hq

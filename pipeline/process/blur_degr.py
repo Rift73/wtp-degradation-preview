@@ -124,21 +124,18 @@ class Blur:
         Returns:
             tuple: A tuple containing the image with applied blur effects and the corresponding high-quality image.
         """
-        try:
-            BLUR_MAP = {
-                "gauss": self.__gauss,
-                "box": self.__box,
-                "median": self.__median,
-                "lens": self.__lens,
-                "motion": self.__motion,
-                "random": self.__random,
-            }
+        BLUR_MAP = {
+            "gauss": self.__gauss,
+            "box": self.__box,
+            "median": self.__median,
+            "lens": self.__lens,
+            "motion": self.__motion,
+            "random": self.__random,
+        }
 
-            if probability(self.probability):
-                return lq, hq
-            blur_method = random.choice(self.filter)
-            lq = BLUR_MAP[blur_method](lq)
-
+        if probability(self.probability):
             return lq, hq
-        except Exception as e:
-            logging.error("Blur error: %s", e)
+        blur_method = random.choice(self.filter)
+        lq = BLUR_MAP[blur_method](lq)
+
+        return lq, hq

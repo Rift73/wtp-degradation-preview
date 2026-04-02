@@ -29,33 +29,29 @@ class Banding:
         self.probability = banding_dict.get("probability", 1.0)
 
     def run(self, lq: np.ndarray, hq: np.ndarray) -> tuple:
-        try:
-            if probability(self.probability):
-                return lq, hq
-
-            if not (_HAS_GPU and torch.cuda.is_available()):
-                logging.warning("Banding requires CUDA — skipping")
-                return lq, hq
-
-            bits = int(np.random.randint(self.bits[0], self.bits[1] + 1))
-
-            logging.debug(
-                f"Banding - bits: {bits} broadcast: {self.broadcast_range}"
-            )
-
-            if lq.ndim == 2:
-                tensor = torch.from_numpy(lq[None, None]).cuda()
-            else:
-                tensor = torch.from_numpy(lq.transpose(2, 0, 1)[None]).cuda()
-
-            result = color_banding_pt(tensor, bits, self.broadcast_range)
-
-            out = result.squeeze(0).cpu().numpy()
-            if lq.ndim == 2:
-                lq = out.squeeze(0).astype(np.float32)
-            else:
-                lq = out.transpose(1, 2, 0).astype(np.float32)
-            return np.clip(lq, 0, 1), hq
-        except Exception as e:
-            logging.error(f"Banding error: {e}")
+        if probability(self.probability):
             return lq, hq
+
+        if not (_HAS_GPU and torch.cuda.is_available()):
+            logging.warning("Banding requires CUDA — skipping")
+            return lq, hq
+
+        bits = int(np.random.randint(self.bits[0], self.bits[1] + 1))
+
+        logging.debug(
+            f"Banding - bits: {bits} broadcast: {self.broadcast_range}"
+        )
+
+        if lq.ndim == 2:
+            tensor = torch.from_numpy(lq[None, None]).cuda()
+        else:
+            tensor = torch.from_numpy(lq.transpose(2, 0, 1)[None]).cuda()
+
+        result = color_banding_pt(tensor, bits, self.broadcast_range)
+
+        out = result.squeeze(0).cpu().numpy()
+        if lq.ndim == 2:
+            lq = out.squeeze(0).astype(np.float32)
+        else:
+            lq = out.transpose(1, 2, 0).astype(np.float32)
+        return np.clip(lq, 0, 1), hq

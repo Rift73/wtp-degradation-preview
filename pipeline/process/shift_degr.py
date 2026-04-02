@@ -215,35 +215,32 @@ class Shift:
         Returns:
         tuple[np.ndarray, np.ndarray]: The transformed low-quality image and the high-quality image.
         """
-        try:
-            if lq.ndim == 2:
-                return lq, hq
-            if probability(self.probability):
-                return lq, hq
-            type_shift = random.choice(self.type_list)
-            logging.debug(f"Shift - type: {type_shift}")
-
-            # GPU path: convert numpy→tensor, process on GPU, convert back
-            if _HAS_GPU_SHIFT and torch.cuda.is_available():
-                amounts = {
-                    "rgb": self.rgb_amount_list,
-                    "yuv": self.yuv_amount_list,
-                    "cmyk": self.cmyk_amount_list,
-                }.get(type_shift, self.rgb_amount_list)
-                percent = self.shift_channel == shift_percent
-                tensor = torch.from_numpy(lq.transpose(2, 0, 1)[None]).cuda()
-                result = channel_shift_pt(tensor, type_shift, amounts, percent)
-                lq = result.squeeze(0).cpu().numpy().transpose(1, 2, 0)
-                lq = np.clip(lq, 0, 1).astype(np.float32)
-                return lq, hq
-
-            # CPU fallback
-            SHIFT_TYPE_MAP = {
-                "rgb": self.__rgb_chanel_shift,
-                "cmyk": self.__cmyk_chanel_shift,
-                "yuv": self.__yuv_chanel_shift,
-            }
-            lq = SHIFT_TYPE_MAP[type_shift](lq)
+        if lq.ndim == 2:
             return lq, hq
-        except Exception as e:
-            logging.error(f"Shift error: {e}")
+        if probability(self.probability):
+            return lq, hq
+        type_shift = random.choice(self.type_list)
+        logging.debug(f"Shift - type: {type_shift}")
+
+        # GPU path: convert numpy→tensor, process on GPU, convert back
+        if _HAS_GPU_SHIFT and torch.cuda.is_available():
+            amounts = {
+                "rgb": self.rgb_amount_list,
+                "yuv": self.yuv_amount_list,
+                "cmyk": self.cmyk_amount_list,
+            }.get(type_shift, self.rgb_amount_list)
+            percent = self.shift_channel == shift_percent
+            tensor = torch.from_numpy(lq.transpose(2, 0, 1)[None]).cuda()
+            result = channel_shift_pt(tensor, type_shift, amounts, percent)
+            lq = result.squeeze(0).cpu().numpy().transpose(1, 2, 0)
+            lq = np.clip(lq, 0, 1).astype(np.float32)
+            return lq, hq
+
+        # CPU fallback
+        SHIFT_TYPE_MAP = {
+            "rgb": self.__rgb_chanel_shift,
+            "cmyk": self.__cmyk_chanel_shift,
+            "yuv": self.__yuv_chanel_shift,
+        }
+        lq = SHIFT_TYPE_MAP[type_shift](lq)
+        return lq, hq

@@ -131,54 +131,51 @@ class Resize:
         Returns:
             Tuple of numpy.ndarrays: Resized low quality image and high quality image.
         """
-        try:
-            if probability(self.probability):
-                return lq, hq
-            height, width = lq.shape[:2]
-            algorithm_lq = random.choice(self.lq_algorithm)
-            algorithm_hq = random.choice(self.hq_algorithm)
-            spread = random.choice(self.spread_arange)
-            height = self.__real_size(height // spread)
-            width = self.__real_size(width // spread)
-            logging.debug(
-                f"Resize - algorithm_lq: {algorithm_lq} algorithm_hq: {algorithm_hq} spread: {spread:.4f}"
-            )
-            if algorithm_lq == "down_up":
-                lq = self.__down_up(lq, width//self.lq_scale, height//self.lq_scale)
-                algorithm_lq = random.choice(self.down_up_alg_up)
-                logging.debug(f"Resize - down_up new_algorithm_lq: {algorithm_lq}")
-            if algorithm_lq == "up_down":
-                lq = self.__up_down(lq, width, height)
-                algorithm_lq = random.choice(self.up_down_alg_down)
-                logging.debug(f"Resize - up_down new_algorithm_lq: {algorithm_lq}")
-            if algorithm_lq == "down_down":
-                algorithm_lq = random.choice(self.down_down_alg)
-                logging.debug(f"Resize - down_down new_algorithm_lq: {algorithm_lq}")
-                lq = self.__down_down(lq, width, height, algorithm_lq)
+        if probability(self.probability):
+            return lq, hq
+        height, width = lq.shape[:2]
+        algorithm_lq = random.choice(self.lq_algorithm)
+        algorithm_hq = random.choice(self.hq_algorithm)
+        spread = random.choice(self.spread_arange)
+        height = self.__real_size(height // spread)
+        width = self.__real_size(width // spread)
+        logging.debug(
+            f"Resize - algorithm_lq: {algorithm_lq} algorithm_hq: {algorithm_hq} spread: {spread:.4f}"
+        )
+        if algorithm_lq == "down_up":
+            lq = self.__down_up(lq, width//self.lq_scale, height//self.lq_scale)
+            algorithm_lq = random.choice(self.down_up_alg_up)
+            logging.debug(f"Resize - down_up new_algorithm_lq: {algorithm_lq}")
+        if algorithm_lq == "up_down":
+            lq = self.__up_down(lq, width, height)
+            algorithm_lq = random.choice(self.up_down_alg_down)
+            logging.debug(f"Resize - up_down new_algorithm_lq: {algorithm_lq}")
+        if algorithm_lq == "down_down":
+            algorithm_lq = random.choice(self.down_down_alg)
+            logging.debug(f"Resize - down_down new_algorithm_lq: {algorithm_lq}")
+            lq = self.__down_down(lq, width, height, algorithm_lq)
 
-            lq = self.__resize(
-                lq,
-                int(width // self.lq_scale),
-                int(height // self.lq_scale),
-                algorithm_lq
-            )
-            hq = self.__resize(
-                hq,
-                int(width),
-                int(height),
-                algorithm_hq,
-            )
-            # Upscale LQ back to HQ size so comparison slider works
-            lq = self.__resize(
-                lq,
-                int(width),
-                int(height),
-                "cubic_mitchell",
-            )
+        lq = self.__resize(
+            lq,
+            int(width // self.lq_scale),
+            int(height // self.lq_scale),
+            algorithm_lq
+        )
+        hq = self.__resize(
+            hq,
+            int(width),
+            int(height),
+            algorithm_hq,
+        )
+        # Upscale LQ back to HQ size so comparison slider works
+        lq = self.__resize(
+            lq,
+            int(width),
+            int(height),
+            "cubic_mitchell",
+        )
 
-            if self.color_fix:
-                lq = fast_color_level(lq, 0, 254)
-                hq = fast_color_level(hq, 0, 254)
-            return lq.squeeze().clip(0,1), hq.squeeze().clip(0,1)
-        except Exception as e:
-            logging.error("Resize error: %s", e)
+        if self.color_fix:
+            lq = fast_color_level(lq, 0, 254)
+            hq = fast_color_level(hq, 0, 254)
+        return lq.squeeze().clip(0,1), hq.squeeze().clip(0,1)

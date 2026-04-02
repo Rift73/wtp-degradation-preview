@@ -42,19 +42,16 @@ class Sin:
         Returns:
             tuple: A tuple containing the image with sinusoidal patterns applied and the corresponding high-quality image.
         """
-        try:
-            if probability(self.probability):
-                return lq, hq
-            shape = random.randrange(*self.shape)
-            alpha = safe_uniform(self.alpha)
-            vertical = not probability(self.vertical_prob)
-            bias = safe_uniform(self.bias)
-            logging.debug(
-                f"Sin - shape: {shape} alpha: {alpha:.4f} vertical: {vertical} bias: {bias:.4f}"
-            )
-            lq = sin_patern(
-                lq, shape_sin=shape, alpha=alpha, vertical=vertical, bias=bias
-            )
-            return lq.clip(0, 1), hq
-        except Exception as e:
-            logging.error(f"Sin error: {e}")
+        if probability(self.probability):
+            return lq, hq
+        shape = random.randrange(*self.shape)
+        alpha = safe_uniform(self.alpha)
+        vertical = not probability(self.vertical_prob)
+        bias = safe_uniform(self.bias)
+        logging.debug(
+            f"Sin - shape: {shape} alpha: {alpha:.4f} vertical: {vertical} bias: {bias:.4f}"
+        )
+        lq = sin_patern(
+            lq, shape_sin=shape, alpha=alpha, vertical=vertical, bias=bias
+        )
+        return lq.clip(0, 1), hq

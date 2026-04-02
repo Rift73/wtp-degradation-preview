@@ -211,27 +211,24 @@ class Screentone:
             "not_rot": self.__not_rot_halftone,
             "gray": self.__gray_halftone,
         }
-        try:
-            if probability(self.probability):
-                return lq, hq
-
-            dot_size = random.choice(self.dot_range)
-            if np.ndim(lq) != 2:
-                color_type = random.choice(self.type)
-                lq, hq = HALFTONE_TYPE_MAP[color_type](lq, hq, dot_size)
-            else:
-                angle = int(random.choice(self.angle))
-                dot_type = DOT_TYPE.get(
-                    random.choice(self.dot_type_list), DOT_TYPE["circle"]
-                )
-                logging.debug(
-                    f"Screentone - type: gray dot: {dot_size}  gray angle: {angle} gray dot_type: {dot_type}",
-                )
-                lq = screentone(lq, dot_size, angle, dot_type)
-
-            if self.lqhq:
-                hq = lq
+        if probability(self.probability):
             return lq, hq
 
-        except Exception as e:
-            logging.error("screentone error: %s", e)
+        dot_size = random.choice(self.dot_range)
+        if np.ndim(lq) != 2:
+            color_type = random.choice(self.type)
+            lq, hq = HALFTONE_TYPE_MAP[color_type](lq, hq, dot_size)
+        else:
+            angle = int(random.choice(self.angle))
+            dot_type = DOT_TYPE.get(
+                random.choice(self.dot_type_list), DOT_TYPE["circle"]
+            )
+            logging.debug(
+                f"Screentone - type: gray dot: {dot_size}  gray angle: {angle} gray dot_type: {dot_type}",
+            )
+            lq = screentone(lq, dot_size, angle, dot_type)
+
+        if self.lqhq:
+            hq = lq
+        return lq, hq
+
