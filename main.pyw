@@ -156,22 +156,30 @@ class ProcessWorker(QThread):
             lq = self.source.copy()
             hq = self.source.copy()
 
+            errors = []
             for config in self.configs:
                 type_key = config["type"]
                 cls = get_class(type_key)
                 if cls is None:
-                    logging.warning("Unknown degradation type: %s", type_key)
+                    errors.append(f"[{type_key}] Unknown degradation type")
                     continue
                 instance = cls(config)
                 try:
                     result = instance.run(lq, hq)
-                except Exception as e:
-                    logging.warning("Degradation %s failed: %s", type_key, e)
+                except Exception:
+                    tb = traceback.format_exc()
+                    errors.append(f"[{type_key}] {tb}")
+                    logging.error("Degradation %s failed:\n%s", type_key, tb)
                     continue
                 if result is not None:
                     lq, hq = result
 
             elapsed = time.perf_counter() - t0
+            if errors:
+                self.error_occurred.emit(
+                    f"{len(errors)} degradation(s) failed:\n\n"
+                    + "\n".join(errors)
+                )
             self.result_ready.emit(lq, hq, elapsed)
         except Exception:
             self.error_occurred.emit(traceback.format_exc())
@@ -415,8 +423,19 @@ class MainWindow(QMainWindow):
 
     def _on_error(self, msg):
         self.progress.hide()
-        self.status.showMessage("Error during processing")
+        # Show first line in status bar, full traceback in a dialog
+        first_line = msg.strip().split("\n")[0][:120]
+        self.status.showMessage(f"Error: {first_line}")
         logging.error("Pipeline error:\n%s", msg)
+
+        from PySide6.QtWidgets import QMessageBox
+        dlg = QMessageBox(self)
+        dlg.setIcon(QMessageBox.Icon.Warning)
+        dlg.setWindowTitle("Degradation Error")
+        dlg.setText("One or more degradation steps failed.")
+        dlg.setDetailedText(msg)
+        dlg.show()
+
         if self._pending_rerun:
             self._pending_rerun = False
             self._run_pipeline()
@@ -427,7 +446,17 @@ class MainWindow(QMainWindow):
 # ──────────────────────────────────────────────
 
 def main():
-    logging.basicConfig(level=logging.DEBUG, format="%(levelname)s: %(message)s")
+    # Log to file since pythonw.exe has no console
+    log_path = os.path.join(_OWN_DIR, "wtp_preview.log")
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format="%(asctime)s %(levelname)s: %(message)s",
+        datefmt="%H:%M:%S",
+        handlers=[
+            logging.FileHandler(log_path, mode="w", encoding="utf-8"),
+            logging.StreamHandler(),  # also stderr if running from terminal
+        ],
+    )
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
 
