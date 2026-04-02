@@ -157,14 +157,27 @@ class ProcessWorker(QThread):
             hq = self.source.copy()
 
             errors = []
+            from pipeline.process import FAILED_MODULES
             for config in self.configs:
                 type_key = config["type"]
                 cls = get_class(type_key)
                 if cls is None:
-                    errors.append(f"[{type_key}] Unknown degradation type")
+                    # Check if the module failed to load — give the real reason
+                    matched = [
+                        (mod, tb) for mod, tb in FAILED_MODULES.items()
+                        if type_key in mod
+                    ]
+                    if matched:
+                        mod_name, mod_tb = matched[0]
+                        errors.append(
+                            f"[{type_key}] Module '{mod_name}' failed to load "
+                            f"(missing dependency?):\n{mod_tb}"
+                        )
+                    else:
+                        errors.append(f"[{type_key}] Unknown degradation type")
                     continue
-                instance = cls(config)
                 try:
+                    instance = cls(config)
                     result = instance.run(lq, hq)
                 except Exception:
                     tb = traceback.format_exc()
