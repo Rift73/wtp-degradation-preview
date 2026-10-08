@@ -1,7 +1,12 @@
-"""Seeded fractal procedural noise (perlin and simplex) in numpy.
+"""Seeded fractal procedural noise (perlin and simplex).
 
 pepeline 1.x's noise() takes no seed, so procedural noise re-rolled on every run. Here every
 random choice comes from a numpy Generator built from the caller's seed.
+
+The generators run in torch, on CUDA when it is available, with float32 elementwise and
+gather ops only, so a device always gives the same output for a seed. The numpy generators
+are the reference and the fallback without torch; the torch ones repeat their operations in
+the same order and agree with them to float32 rounding.
 
 The simplex generator is a port of SimplexNoise from chaiNNer
 (backend/src/nodes/impl/noise_functions/simplex.py, GPL-3.0,
@@ -12,6 +17,13 @@ native fast path.
 import numpy as np
 
 from ..constants import NOISE_MAP
+
+try:
+    import torch
+
+    _HAS_TORCH = True
+except ImportError:
+    _HAS_TORCH = False
 
 # Permutation-table size (a power of two); the lattice repeats every _TABLE_SIZE cells
 _TABLE_SIZE = 1024
@@ -168,12 +180,138 @@ def _simplex(
     return np.stack(slices, axis=-1) * _SIMPLEX_SCALE[3]
 
 
+def _perlin_torch(
+    x: np.ndarray, y: np.ndarray, perm: "torch.Tensor", z: np.ndarray | None = None
+) -> "torch.Tensor":
+    """_perlin with the per-pixel work in torch on perm's device. The lattice cells and
+    offsets are still taken on the host from the float64 coordinates."""
+    device = perm.device
+    mask = perm.numel() - 1
+    dims = 2 if z is None else 3
+    gradients = torch.from_numpy(_GRADIENTS[dims]).to(device)[
+        :, perm % _GRADIENTS[dims].shape[1]
+    ]
+    xi = np.floor(x)
+    fx = (x - xi).astype(np.float32)
+    xi = xi.astype(np.intp)
+    yi = np.floor(y)
+    fy = (y - yi).astype(np.float32)[:, None]
+    yi = yi.astype(np.intp)
+    rows, row_index = np.unique(np.concatenate((yi, yi + 1)), return_inverse=True)
+    xi, fx, fy, rows, top, bottom = (
+        torch.from_numpy(a).to(device)
+        for a in (
+            xi, fx, fy, (rows & mask)[:, None], row_index[: y.size], row_index[y.size :]
+        )
+    )
+    u = _fade(fx)
+    v = _fade(fy)
+    left = (perm[xi & mask] + rows) & mask
+    right = (perm[(xi + 1) & mask] + rows) & mask
+
+    def plane(left: "torch.Tensor", right: "torch.Tensor") -> tuple:
+        p = ((1 - u) * fx) * gradients[0][left] + (u * (fx - 1)) * gradients[0][right]
+        q = (1 - u) * gradients[1][left] + u * gradients[1][right]
+        value = p[top] * (1 - v)
+        value += q[top] * ((1 - v) * fy)
+        value += p[bottom] * v
+        value += q[bottom] * (v * (fy - 1))
+        if dims == 2:
+            return value, None
+        r = (1 - u) * gradients[2][left] + u * gradients[2][right]
+        return value, r[top] * (1 - v) + r[bottom] * v
+
+    if dims == 2:
+        return plane(left, right)[0] * _PERLIN_SCALE[2]
+    left = perm[left]
+    right = perm[right]
+    zi = np.floor(z)
+    fz = (z - zi).astype(np.float32)
+    zi = zi.astype(np.intp)
+    planes = {
+        k: plane((left + k) & mask, (right + k) & mask) for k in np.union1d(zi, zi + 1)
+    }
+    slices = []
+    for k, dz in zip(zi, fz):
+        (lower, lower_slope), (upper, upper_slope) = planes[k], planes[k + 1]
+        w = _fade(dz)
+        slices.append(
+            (1 - w) * (lower + dz * lower_slope) + w * (upper + (dz - 1) * upper_slope)
+        )
+    return torch.stack(slices, -1) * _PERLIN_SCALE[3]
+
+
+def _simplex_grid_torch(coords: tuple, perm: "torch.Tensor") -> "torch.Tensor":
+    """_simplex_grid with the per-pixel work in torch on perm's device. Each per-axis term
+    of a skewed coordinate is still reduced on the host in float64, then summed on the
+    device."""
+    device = perm.device
+    dims = len(coords)
+    size = perm.numel()
+    mask = size - 1
+    skew = ((dims + 1) ** 0.5 - 1) / dims
+    unskew = (1 - (dims + 1) ** -0.5) / dims
+    gradients = torch.from_numpy(_GRADIENTS[dims]).to(device)[
+        :, perm % _GRADIENTS[dims].shape[1]
+    ]
+    base, frac = [], []
+    for axis in range(dims):
+        skewed = sum(
+            torch.from_numpy(
+                np.asarray(((c * (skew + (axis == other))) % size).astype(np.float32))
+            ).to(device)
+            for other, c in enumerate(coords)
+        )
+        cell = torch.floor(skewed)
+        frac.append(skewed - cell)
+        base.append(cell.long())
+    total = sum(frac) * unskew
+    offsets = [f - total for f in frac]
+    rank = [
+        sum(
+            frac[other] >= frac[axis] if other < axis else frac[other] > frac[axis]
+            for other in range(dims)
+            if other != axis
+        )
+        for axis in range(dims)
+    ]
+    contributions = []
+    for vertex in range(dims + 1):
+        # Integer steps: torch cannot subtract a bool tensor
+        step = (
+            [(r < vertex).long() for r in rank] if 0 < vertex < dims
+            else [vertex // dims] * dims
+        )
+        index = (base[0] + step[0]) & mask
+        for axis in range(1, dims):
+            index = (perm[index] + base[axis] + step[axis]) & mask
+        d = [offsets[axis] - step[axis] + vertex * unskew for axis in range(dims)]
+        falloff = (_RADIUS2 - sum(c * c for c in d)).clamp_(min=0)
+        falloff *= falloff
+        falloff *= falloff
+        contributions.append(
+            falloff * sum(gradients[axis][index] * d[axis] for axis in range(dims))
+        )
+    return sum(contributions)
+
+
+def _simplex_torch(
+    x: np.ndarray, y: np.ndarray, perm: "torch.Tensor", z: np.ndarray | None = None
+) -> "torch.Tensor":
+    """_simplex in torch on perm's device."""
+    if z is None:
+        return _simplex_grid_torch((x, y[:, None]), perm) * _SIMPLEX_SCALE[2]
+    slices = [_simplex_grid_torch((x, y[:, None], height), perm) for height in z]
+    return torch.stack(slices, -1) * _SIMPLEX_SCALE[3]
+
+
 _GENERATORS = {"perlin": _perlin, "simplex": _simplex}
+_TORCH_GENERATORS = {"perlin": _perlin_torch, "simplex": _simplex_torch}
 
 
 def fractal_noise(
     shape: tuple, noise_type: str, octaves: int, frequency: float, lacunarity: float,
-    seed: int,
+    seed: int, reference: bool = False,
 ) -> np.ndarray:
     """Fractal noise in [-1, 1] as float32; the same seed gives the same output.
 
@@ -183,19 +321,32 @@ def fractal_noise(
     c * frequency, as pepeline 0.3 does: channels are near copies at low frequencies and
     independent at high ones. Every octave has its own permutation table and a sub-cell
     offset, so integer frequencies do not sample only lattice points (where gradient noise
-    is 0)."""
+    is 0).
+
+    Rendered in torch, on CUDA when it is available, else on the CPU; reference=True, or a
+    missing torch, renders with the numpy reference instead."""
     generator, stream, amplitude = NOISE_MAP[noise_type]
-    generate = _GENERATORS[generator]
+    on_torch = _HAS_TORCH and not reference
+    if on_torch:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        generate = _TORCH_GENERATORS[generator]
+        noise = torch.zeros(shape, dtype=torch.float32, device=device)
+    else:
+        generate = _GENERATORS[generator]
+        noise = np.zeros(shape, np.float32)
     rng = np.random.default_rng((seed, stream))
-    noise = np.zeros(shape, np.float32)
     for i in range(octaves):
         step = frequency * lacunarity**i
         offset_x, offset_y, offset_z = rng.random(3)
         perm = rng.permutation(_TABLE_SIZE)
+        if on_torch:
+            perm = torch.from_numpy(perm).to(device)
         z = None if len(shape) == 2 else np.arange(shape[2]) * step + offset_z
         noise += 0.5**i * generate(
             np.arange(shape[1]) * step + offset_x, np.arange(shape[0]) * step + offset_y,
             perm, z,
         )
     noise *= amplitude / sum(0.5**i for i in range(octaves))
+    if on_torch:
+        return noise.clamp_(-1, 1).cpu().numpy()
     return np.clip(noise, -1, 1, out=noise)

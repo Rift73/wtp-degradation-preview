@@ -1,5 +1,6 @@
 import numpy as np
 import colour
+from concurrent.futures import ThreadPoolExecutor
 
 from .custom_blur import motion_blur
 from .procedural_noise import fractal_noise
@@ -9,6 +10,41 @@ from ..utils.random import safe_uniform, safe_arange, safe_randint
 import cv2 as cv
 from ..utils.registry import register_class
 import logging
+
+# Per-pixel noise is drawn in parallel blocks, each from its own child of one seed taken from
+# numpy's global RNG, so the engine's per-step np.random.seed applies. The block count is
+# fixed, so the noise does not depend on the number of CPU cores.
+_DRAW_BLOCKS = 16
+_DRAW_POOL = ThreadPoolExecutor()
+
+
+def _draw(shape: tuple, fill) -> np.ndarray:
+    """float32 noise of the given shape from a numpy Generator method that fills `out`
+    (Generator.standard_normal or Generator.random)."""
+    noise = np.empty(shape, np.float32)
+    seeds = np.random.SeedSequence(int(np.random.randint(0, 2**31 - 1))).spawn(_DRAW_BLOCKS)
+    blocks = np.array_split(noise.reshape(-1), _DRAW_BLOCKS)
+    list(_DRAW_POOL.map(
+        lambda seed, block: fill(np.random.default_rng(seed), out=block, dtype=np.float32),
+        seeds, blocks,
+    ))
+    return noise
+
+
+def _affine(convert) -> np.ndarray:
+    """The 3x4 matrix [A | b] of an affine map of 3-vectors, convert(p) = A p + b."""
+    points = convert(np.vstack((np.zeros(3), np.eye(3))))
+    return np.hstack(((points[1:] - points[0]).T, points[0][:, None]))
+
+
+# colour's BT.2020 conversions as used here (RGB in [0, 1] to 8-bit legal-range YCbCr as
+# float, and back) are affine, so cv.transform applies them as one matrix each, in float32
+# instead of colour's float64 intermediates
+_BT2020 = colour.models.rgb.ycbcr.WEIGHTS_YCBCR["ITU-R BT.2020"]
+_RGB_TO_YCBCR = _affine(lambda rgb: colour.RGB_to_YCbCr(rgb, in_bits=8, K=_BT2020))
+_YCBCR_TO_RGB = _affine(
+    lambda yuv: colour.YCbCr_to_RGB(yuv, in_bits=8, out_bits=8, K=_BT2020)
+)
 
 
 @register_class("noise")
@@ -106,7 +142,7 @@ class Noise:
         self.scale_cof = safe_uniform(self.scale_size)
         noise = normalize(
             resize(
-                noise.astype(np.float32) * 0.5 + 0.5,
+                noise * 0.5 + 0.5,
                 (int(shape[1] * self.scale_cof), int(shape[0] * self.scale_cof)),
                 ResizeFilter.Lanczos,
                 False,
@@ -147,9 +183,9 @@ class Noise:
         if self.bias != [0, 0]:
             bias = safe_uniform(self.bias)
             noise += bias
-            noise = noise.clip(-1, 1)
+            np.clip(noise, -1, 1, out=noise)
         alpha = np.random.choice(self.alpha_rand)
-        noise *= alpha
+        noise *= float(alpha)
         logging.debug(
             "%s noise_type: %s alpha: %.4f bias: %.4f octaves: %s frequency: %.4f lacunarity: %.4f",
             self.default_debug,
@@ -162,11 +198,12 @@ class Noise:
         )
         if self.noise_clip:
             noise = self.__noise_clip(noise, lq)
-
-        return (lq + noise).clip(0, 1)
+        noise += lq
+        return np.clip(noise, 0, 1, out=noise)
 
     def __gauss(self, lq: np.ndarray) -> np.ndarray:
-        noise = np.random.normal(0, 0.25, lq.shape)
+        noise = _draw(lq.shape, np.random.Generator.standard_normal)
+        noise *= 0.25
         if not probability(self.motion_probability):
             noise = self.motion(noise)
         if not probability(self.scale_probability):
@@ -175,9 +212,9 @@ class Noise:
         if self.bias != [0, 0]:
             bias = safe_uniform(self.bias)
             noise += bias
-            noise = noise.clip(-1, 1)
+            np.clip(noise, -1, 1, out=noise)
         alpha = np.random.choice(self.alpha_rand)
-        noise *= alpha
+        noise *= float(alpha)
         logging.debug(
             "%s noise_type: %s alpha: %.4f bias: %.4f scale: %.4f",
             self.default_debug,
@@ -188,10 +225,13 @@ class Noise:
         )
         if self.noise_clip:
             noise = self.__noise_clip(noise, lq)
-        return (lq + noise).astype(np.float32)
+        noise += lq
+        return noise
 
     def __uniform_noise(self, lq: np.ndarray) -> np.ndarray:
-        noise = np.random.uniform(-1, 1, lq.shape)
+        noise = _draw(lq.shape, np.random.Generator.random)
+        noise *= 2
+        noise -= 1
         if not probability(self.motion_probability):
             noise = self.motion(noise)
         if not probability(self.scale_probability):
@@ -200,9 +240,9 @@ class Noise:
         if self.bias != [0, 0]:
             bias = safe_uniform(self.bias)
             noise += bias
-            noise = noise.clip(-1, 1)
+            np.clip(noise, -1, 1, out=noise)
         alpha = np.random.choice(self.alpha_rand)
-        noise *= alpha
+        noise *= float(alpha)
         logging.debug(
             "%s noise_type: %s alpha: %.4f bias: %.4f scale: %.4f",
             self.default_debug,
@@ -213,7 +253,8 @@ class Noise:
         )
         if self.noise_clip:
             noise = self.__noise_clip(noise, lq)
-        return (lq + noise).astype(np.float32)
+        noise += lq
+        return noise
 
     def __salt_and_pepper_core(self, img_shape: tuple) -> (np.ndarray, float):
         noise = np.random.uniform(0, 1, img_shape)
@@ -278,56 +319,28 @@ class Noise:
         }
         if probability(self.probability):
             return lq, hq
-        y = False
-        uv = False
+        # The YCbCr channels that get the noise (Y, or Cb and Cr), None for RGB
+        channels = None
         if lq.ndim == 3:
             if not probability(self.y_noise):
-                y = True
-                yuv_img = colour.RGB_to_YCbCr(
-            lq, in_bits=8, K=colour.models.rgb.ycbcr.WEIGHTS_YCBCR["ITU-R BT.2020"]
-        ).astype(np.float32)
-                lq = yuv_img[:, :, 0]
-                uv_array = yuv_img[:, :, 1:]
+                channels = 0
                 self.default_debug = "Noise - color_type: y"
             elif not probability(self.uv_noise):
-                uv = True
-                yuv_img = colour.RGB_to_YCbCr(
-            lq, in_bits=8, K=colour.models.rgb.ycbcr.WEIGHTS_YCBCR["ITU-R BT.2020"]
-        ).astype(np.float32)
-                lq = yuv_img[:, :, 1:]
-                y_array = yuv_img[:, :, 0]
+                channels = slice(1, None)
                 self.default_debug = "Noise - color_type: uv"
             else:
                 self.default_debug = "Noise - color_type: rgb"
+        if channels is not None:
+            yuv_img = cv.transform(lq, _RGB_TO_YCBCR)
+            lq = yuv_img[:, :, channels]
 
         self.noise_type = np.random.choice(self.type_noise)
         lq = NOISE_TYPE_MAP[self.noise_type](lq)
-        if y:
-            lq = np.stack((lq, uv_array[:, :, 0], uv_array[:, :, 1]), axis=-1)
-            lq = (
-            colour.YCbCr_to_RGB(
-                lq,
-                in_bits=8,
-                out_bits=8,
-                K=colour.models.rgb.ycbcr.WEIGHTS_YCBCR["ITU-R BT.2020"],
-            )
-            .astype(np.float32)
-            .clip(0, 1)
-        )
-        elif uv:
-            lq = np.stack((y_array, lq[:, :, 0], lq[:, :, 1]), axis=-1)
-            lq = (
-            colour.YCbCr_to_RGB(
-                lq,
-                in_bits=8,
-                out_bits=8,
-                K=colour.models.rgb.ycbcr.WEIGHTS_YCBCR["ITU-R BT.2020"],
-            )
-            .astype(np.float32)
-            .clip(0, 1)
-        )
-        else:
-            lq = lq.clip(0, 1)
+        if channels is not None:
+            yuv_img[:, :, channels] = lq
+            lq = cv.transform(yuv_img, _YCBCR_TO_RGB)
+        # Every noise type returns a new array, so it is clipped in place
+        np.clip(lq, 0, 1, out=lq)
 
         if self.lqhq:
             hq = lq
