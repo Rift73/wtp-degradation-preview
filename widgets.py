@@ -2,24 +2,34 @@
 Widgets for the WTP Degradation Preview GUI.
 
 - FloatParam / IntParam / ChoiceParam / BoolParam: individual parameter editors
-- DegradationBlock: styled card with category color bar and collapsible params
-- PipelinePanel: scrollable list with drag-and-drop reorder
+- StepCard: one pipeline step (handle, toggle, title, summary, status dot, actions, params)
+- PipelinePanel: toolbar + scrollable card list with drag-and-drop reorder
 """
 
+import os
+from html import escape
+
 from PySide6.QtWidgets import (
-    QWidget, QHBoxLayout, QVBoxLayout, QFormLayout,
+    QWidget, QHBoxLayout, QVBoxLayout, QGridLayout,
     QSlider, QDoubleSpinBox, QSpinBox, QComboBox,
     QCheckBox, QLabel, QPushButton, QFrame,
-    QScrollArea, QSizePolicy, QApplication,
+    QScrollArea, QSizePolicy, QApplication, QFileDialog, QMessageBox,
 )
-from PySide6.QtCore import Qt, Signal, QMimeData, QPoint
-from PySide6.QtGui import QDrag, QDragEnterEvent, QDropEvent, QPainter, QPixmap, QColor
+from PySide6.QtCore import Qt, Signal, QMimeData, QEvent, QTimer
+from PySide6.QtGui import QDrag, QPainter, QPixmap
 
-from schema import SCHEMAS, SCHEMA_ORDER, CATEGORY_COLORS, build_config
+from schema import SCHEMAS, CATEGORY_OF, CATEGORY_COLORS, build_config, summarize
+from add_menu import AddStepMenu
+from presets import save_preset, load_preset, to_hcl
+
+_ACCENT = "#5B9DF5"
+_PRESET_FILTER = "Pipeline preset (*.json);;All files (*)"
 
 
 # ──────────────────────────────────────────────
 # Individual parameter widgets
+#   value / default: current and schema-default value
+#   controls: sub-widgets that react to the mouse wheel (the panel guards them)
 # ──────────────────────────────────────────────
 
 class FloatParam(QWidget):
@@ -27,14 +37,13 @@ class FloatParam(QWidget):
 
     def __init__(self, pdef, parent=None):
         super().__init__(parent)
-        self._pdef = pdef
         self._block = False
 
         lo = pdef["min"]
         hi = pdef["max"]
         step = pdef.get("step", 0.01)
         decimals = pdef.get("decimals", 2)
-        default = pdef.get("default", lo)
+        self.default = pdef.get("default", lo)
 
         self._lo = lo
         self._step = step
@@ -46,18 +55,19 @@ class FloatParam(QWidget):
 
         self.slider = QSlider(Qt.Orientation.Horizontal)
         self.slider.setRange(0, ticks)
-        self.slider.setValue(int(round((default - lo) / step)))
+        self.slider.setValue(int(round((self.default - lo) / step)))
 
         self.spin = QDoubleSpinBox()
         self.spin.setRange(lo, hi)
         self.spin.setSingleStep(step)
         self.spin.setDecimals(decimals)
-        self.spin.setValue(default)
+        self.spin.setValue(self.default)
         self.spin.setFixedWidth(70)
         self.spin.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
 
         layout.addWidget(self.slider, 1)
         layout.addWidget(self.spin, 0)
+        self.controls = (self.slider, self.spin)
 
         self.slider.valueChanged.connect(self._slider_moved)
         self.spin.valueChanged.connect(self._spin_changed)
@@ -86,7 +96,7 @@ class FloatParam(QWidget):
 
     @value.setter
     def value(self, v):
-        self.spin.setValue(v)
+        self.spin.setValue(float(v))
 
 
 class IntParam(QWidget):
@@ -98,7 +108,7 @@ class IntParam(QWidget):
 
         lo = pdef["min"]
         hi = pdef["max"]
-        default = pdef.get("default", lo)
+        self.default = pdef.get("default", lo)
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -106,16 +116,17 @@ class IntParam(QWidget):
 
         self.slider = QSlider(Qt.Orientation.Horizontal)
         self.slider.setRange(lo, hi)
-        self.slider.setValue(default)
+        self.slider.setValue(self.default)
 
         self.spin = QSpinBox()
         self.spin.setRange(lo, hi)
-        self.spin.setValue(default)
+        self.spin.setValue(self.default)
         self.spin.setFixedWidth(70)
         self.spin.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
 
         layout.addWidget(self.slider, 1)
         layout.addWidget(self.spin, 0)
+        self.controls = (self.slider, self.spin)
 
         self.slider.valueChanged.connect(self._slider_moved)
         self.spin.valueChanged.connect(self._spin_changed)
@@ -158,7 +169,7 @@ class IntParam(QWidget):
 
     @value.setter
     def value(self, v):
-        self.spin.setValue(v)
+        self.spin.setValue(int(v))
 
 
 class ChoiceParam(QComboBox):
@@ -168,9 +179,10 @@ class ChoiceParam(QComboBox):
         super().__init__(parent)
         options = pdef["options"]
         self.addItems([str(o) for o in options])
-        default = pdef.get("default", options[0])
-        idx = options.index(default) if default in options else 0
+        self.default = pdef.get("default", options[0])
+        idx = options.index(self.default) if self.default in options else 0
         self.setCurrentIndex(idx)
+        self.controls = (self,)
         self.currentIndexChanged.connect(lambda _: self.value_changed.emit())
 
     @property
@@ -188,8 +200,10 @@ class BoolParam(QCheckBox):
     value_changed = Signal()
 
     def __init__(self, pdef, parent=None):
-        super().__init__(parent)
-        self.setChecked(pdef.get("default", False))
+        super().__init__(pdef["label"], parent)
+        self.default = pdef.get("default", False)
+        self.setChecked(self.default)
+        self.controls = ()
         self.toggled.connect(lambda _: self.value_changed.emit())
 
     @property
@@ -198,7 +212,7 @@ class BoolParam(QCheckBox):
 
     @value.setter
     def value(self, v):
-        self.setChecked(v)
+        self.setChecked(bool(v))
 
 
 _WIDGET_MAP = {
@@ -209,242 +223,384 @@ _WIDGET_MAP = {
 }
 
 
-def make_param_widget(pdef):
-    cls = _WIDGET_MAP.get(pdef["type"])
-    if cls is None:
-        return QLabel(f"[unsupported: {pdef['type']}]")
-    return cls(pdef)
+def _repolish(widget):
+    widget.style().unpolish(widget)
+    widget.style().polish(widget)
 
 
 # ──────────────────────────────────────────────
-# DegradationBlock — styled card with category color bar
+# StepCard — one pipeline step
 # ──────────────────────────────────────────────
 
-class DegradationBlock(QFrame):
-    """Styled degradation card with a category color accent bar."""
+class StepCard(QFrame):
+    """Card with a category accent bar, a header row and the step's parameters."""
 
-    changed = Signal()
-    request_move_up = Signal(object)
-    request_move_down = Signal(object)
-    request_delete = Signal(object)
+    changed = Signal()                  # a parameter value changed
+    enabled_toggled = Signal()
+    request_move = Signal(object, int)  # card, -1 (up) / +1 (down)
+    request_duplicate = Signal(object)
+    request_remove = Signal(object)
 
-    MIME_TYPE = "application/x-wtp-degradation-block"
+    MIME_TYPE = "application/x-wtp-step-card"
 
     def __init__(self, schema_key, parent=None):
         super().__init__(parent)
         self.schema_key = schema_key
-        schema = SCHEMAS[schema_key]
-        self._drag_start = QPoint()
-        category_color = CATEGORY_COLORS.get(schema_key, "#5B9DF5")
+        self._schema = SCHEMAS[schema_key]
+        self._collapsed = False
+        self._result_state = ""
+        self._summary_text = ""
+        self._press_pos = None
+        self._press_target = None  # "handle" | "header" | None
 
-        self.setObjectName("degradationBlock")
+        self.setObjectName("stepCard")
+        self.setProperty("state", "")
         self.setFrameStyle(QFrame.Shape.NoFrame)
+        self.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
 
-        # ── Outer layout: color bar | content ──
         outer = QHBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
-        # Category color bar
         color_bar = QFrame()
         color_bar.setObjectName("categoryBar")
-        color_bar.setStyleSheet(f"background-color: {category_color};")
         color_bar.setFixedWidth(3)
+        color_bar.setStyleSheet(f"background-color: {CATEGORY_COLORS[CATEGORY_OF[schema_key]]};")
         outer.addWidget(color_bar)
 
-        # Content column
-        content_col = QVBoxLayout()
-        content_col.setContentsMargins(10, 6, 8, 6)
-        content_col.setSpacing(4)
-        outer.addLayout(content_col, 1)
+        column = QVBoxLayout()
+        column.setContentsMargins(8, 6, 8, 8)
+        column.setSpacing(8)
+        outer.addLayout(column, 1)
 
-        # ── Header row ──
-        self.header_widget = QWidget()
-        self.header_widget.setCursor(Qt.CursorShape.OpenHandCursor)
-        header = QHBoxLayout(self.header_widget)
-        header.setContentsMargins(0, 0, 0, 0)
-        header.setSpacing(4)
+        column.addWidget(self._build_header())
+        self.content = self._build_params()
+        column.addWidget(self.content)
+
+        self.set_result(None)
+        self._sync_visibility()
+        self._refresh_summary()
+
+    # ── Construction ──
+
+    def _build_header(self):
+        self.header = QWidget()
+        self.header.setObjectName("cardHeader")
+        grid = QGridLayout(self.header)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(6)
+        grid.setVerticalSpacing(1)
+
+        self.handle = QLabel("\u22EE\u22EE")
+        self.handle.setObjectName("dragHandle")
+        self.handle.setCursor(Qt.CursorShape.OpenHandCursor)
+        self.handle.setToolTip("Drag to reorder")
 
         self.enable_cb = QCheckBox()
         self.enable_cb.setChecked(True)
-        self.enable_cb.setToolTip("Enable/disable this degradation")
-        self.enable_cb.toggled.connect(self._on_toggle)
+        self.enable_cb.setToolTip("Enable / disable this step")
+        self.enable_cb.toggled.connect(self._on_enabled_toggled)
 
-        self.title_btn = QPushButton(schema["label"])
-        self.title_btn.setObjectName("blockTitle")
-        self.title_btn.clicked.connect(self._toggle_content)
+        self.title = QLabel()
+        self.title.setObjectName("cardTitle")
+        self.title.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.title.setToolTip("Click to collapse / expand")
 
-        btn_up = QPushButton("\u25B2")
-        btn_up.setObjectName("iconBtn")
-        btn_up.setFixedSize(22, 22)
-        btn_up.setToolTip("Move up")
-        btn_up.clicked.connect(lambda: self.request_move_up.emit(self))
+        self.status_dot = QLabel()
+        self.status_dot.setObjectName("statusDot")
+        self.status_dot.setFixedSize(8, 8)
 
-        btn_down = QPushButton("\u25BC")
-        btn_down.setObjectName("iconBtn")
-        btn_down.setFixedSize(22, 22)
-        btn_down.setToolTip("Move down")
-        btn_down.clicked.connect(lambda: self.request_move_down.emit(self))
+        actions = QWidget()
+        actions.setObjectName("cardActions")
+        row = QHBoxLayout(actions)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(2)
+        for glyph, tip, name, slot in (
+            ("\u25B2", "Move up", "iconBtn", lambda: self.request_move.emit(self, -1)),
+            ("\u25BC", "Move down", "iconBtn", lambda: self.request_move.emit(self, 1)),
+            ("\u2750", "Duplicate", "iconBtn", lambda: self.request_duplicate.emit(self)),
+            ("\u21BA", "Reset to defaults", "iconBtn", self.reset_values),
+            ("\u2715", "Remove (Del)", "deleteBtn", lambda: self.request_remove.emit(self)),
+        ):
+            btn = QPushButton(glyph)
+            btn.setObjectName(name)
+            btn.setFixedSize(22, 22)
+            btn.setToolTip(tip)
+            btn.clicked.connect(slot)
+            row.addWidget(btn)
 
-        btn_del = QPushButton("\u2715")
-        btn_del.setObjectName("deleteBtn")
-        btn_del.setFixedSize(22, 22)
-        btn_del.setToolTip("Remove")
-        btn_del.clicked.connect(lambda: self.request_delete.emit(self))
+        self.summary = QLabel()
+        self.summary.setObjectName("cardSummary")
+        self.summary.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
 
-        header.addWidget(self.enable_cb)
-        header.addWidget(self.title_btn, 1)
-        header.addWidget(btn_up)
-        header.addWidget(btn_down)
-        header.addWidget(btn_del)
-        content_col.addWidget(self.header_widget)
+        grid.addWidget(self.handle, 0, 0)
+        grid.addWidget(self.enable_cb, 0, 1)
+        grid.addWidget(self.title, 0, 2)
+        grid.addWidget(self.status_dot, 0, 3)
+        grid.addWidget(actions, 0, 4)
+        grid.addWidget(self.summary, 1, 2, 1, 3)
+        grid.setColumnStretch(2, 1)
+        return self.header
 
-        # ── Parameters ──
-        self.content = QWidget()
-        form = QFormLayout(self.content)
-        form.setContentsMargins(4, 2, 0, 2)
-        form.setSpacing(5)
-        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+    def _build_params(self):
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
 
         self.param_widgets = {}
         self.param_labels = {}
-        for pdef in schema["params"]:
-            w = make_param_widget(pdef)
-            self.param_widgets[pdef["key"]] = w
-            label = QLabel(pdef["label"])
-            label.setObjectName("sectionLabel")
-            label.setFixedWidth(110)
-            self.param_labels[pdef["key"]] = label
-            form.addRow(label, w)
-            if hasattr(w, "value_changed"):
-                w.value_changed.connect(self.changed.emit)
-
-        # Wire dynamic profile dependencies (e.g. codec → quality range)
-        for pdef in schema["params"]:
-            profiles = pdef.get("profiles")
-            if not profiles:
+        for pdef in self._schema["params"]:
+            widget = _WIDGET_MAP[pdef["type"]](pdef)
+            help_text = pdef.get("help", "")
+            widget.setToolTip(help_text)
+            widget.value_changed.connect(self._on_value_changed)
+            self.param_widgets[pdef["key"]] = widget
+            if isinstance(widget, BoolParam):  # the checkbox carries its own label
+                layout.addWidget(widget)
                 continue
-            source_key = profiles["source"]
-            profile_map = profiles["map"]
-            target_key = pdef["key"]
-            source_widget = self.param_widgets.get(source_key)
-            if source_widget is not None and hasattr(source_widget, "currentTextChanged"):
-                source_widget.currentTextChanged.connect(
-                    lambda val, tk=target_key, pm=profile_map:
-                        self._apply_profile(tk, pm, val)
-                )
+            label = QLabel(pdef["label"])
+            label.setObjectName("paramLabel")
+            label.setWordWrap(True)
+            label.setToolTip(help_text)
+            self.param_labels[pdef["key"]] = label
+            field = QVBoxLayout()
+            field.setSpacing(3)
+            field.addWidget(label)
+            field.addWidget(widget)
+            layout.addLayout(field)
 
-        content_col.addWidget(self.content)
+        # Dynamic profile dependencies (e.g. codec → quality label and range)
+        for pdef in self._schema["params"]:
+            profiles = pdef.get("profiles")
+            if profiles:
+                self.param_widgets[profiles["source"]].currentTextChanged.connect(
+                    lambda val, tk=pdef["key"], pm=profiles["map"]: self._apply_profile(tk, pm, val)
+                )
+        return content
 
     def _apply_profile(self, target_key, profile_map, source_value):
         """Update a parameter widget when its profile source changes."""
         profile = profile_map.get(source_value)
         if profile is None:
             return
-        widget = self.param_widgets.get(target_key)
-        if widget is None:
-            return
-        if hasattr(widget, "set_range"):
-            widget.set_range(profile["min"], profile["max"], profile["default"])
+        self.param_widgets[target_key].set_range(profile["min"], profile["max"], profile["default"])
         label = self.param_labels.get(target_key)
         if label is not None and "label" in profile:
             label.setText(profile["label"])
 
-    def _on_toggle(self, checked):
-        self.content.setEnabled(checked)
-        self.changed.emit()
-
-    def _toggle_content(self):
-        vis = not self.content.isVisible()
-        self.content.setVisible(vis)
-
-    # ── Drag support ──
-
-    def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            if self.header_widget.geometry().contains(event.pos()):
-                self._drag_start = event.pos()
-        super().mousePressEvent(event)
-
-    def mouseMoveEvent(self, event):
-        if not (event.buttons() & Qt.MouseButton.LeftButton):
-            return super().mouseMoveEvent(event)
-        dist = (event.pos() - self._drag_start).manhattanLength()
-        if dist < QApplication.startDragDistance():
-            return super().mouseMoveEvent(event)
-
-        drag = QDrag(self)
-        mime = QMimeData()
-        mime.setData(self.MIME_TYPE, b"")
-        drag.setMimeData(mime)
-
-        # Grab a semi-transparent snapshot
-        pixmap = self.grab()
-        faded = QPixmap(pixmap.size())
-        faded.fill(QColor(0, 0, 0, 0))
-        painter = QPainter(faded)
-        painter.setOpacity(0.7)
-        painter.drawPixmap(0, 0, pixmap)
-        painter.end()
-        drag.setPixmap(faded)
-        drag.setHotSpot(event.pos())
-
-        self.header_widget.setCursor(Qt.CursorShape.ClosedHandCursor)
-        drag.exec(Qt.DropAction.MoveAction)
-        self.header_widget.setCursor(Qt.CursorShape.OpenHandCursor)
+    # ── State ──
 
     @property
     def enabled(self):
         return self.enable_cb.isChecked()
 
+    def set_collapsed(self, collapsed):
+        self._collapsed = collapsed
+        self._sync_visibility()
+
     def get_values(self):
         return {key: w.value for key, w in self.param_widgets.items()}
 
     def get_config(self):
-        if not self.enabled:
-            return None
         return build_config(self.schema_key, self.get_values())
 
+    def get_state(self):
+        return {"type": self.schema_key, "enabled": self.enabled,
+                "collapsed": self._collapsed, "values": self.get_values()}
+
+    def apply_state(self, step):
+        """Restore enabled/collapsed/values; unknown value keys are ignored, missing ones keep defaults."""
+        values = step.get("values", {})
+        for key, widget in self.param_widgets.items():  # schema order: profile sources first
+            if key in values:
+                widget.value = values[key]
+        self.enable_cb.setChecked(bool(step.get("enabled", True)))
+        self.set_collapsed(bool(step.get("collapsed", False)))
+
+    def reset_values(self):
+        for widget in self.param_widgets.values():
+            widget.value = widget.default
+
+    def set_result(self, step):
+        """Show a run result (an object with elapsed_ms / error / error_summary) or idle for None."""
+        if step is None:
+            self._result_state = ""
+            tip = "Not run yet"
+        elif step.error:
+            self._result_state = "error"
+            lines = step.error.strip().splitlines() or ["Error"]
+            summary = step.error_summary or lines[-1]
+            tip = f"<b>{escape(summary)}</b><pre>{escape(step.error.strip())}</pre>"
+        else:
+            self._result_state = "ok"
+            ms = step.elapsed_ms
+            tip = f"{ms:.0f} ms" if ms >= 10 else f"{ms:.1f} ms"
+        self.status_dot.setToolTip(tip)
+        level = self._result_state or "idle"
+        if self.status_dot.property("level") != level:
+            self.status_dot.setProperty("level", level)
+            _repolish(self.status_dot)
+        self._refresh_state()
+
+    def _refresh_state(self):
+        state = self._result_state if self.enabled else "disabled"
+        if self.property("state") == state:
+            return
+        self.setProperty("state", state)
+        # Descendant selectors such as #stepCard[state="disabled"] #cardTitle need the header re-polished too
+        for widget in (self, self.header, *self.header.findChildren(QWidget)):
+            _repolish(widget)
+
+    def _sync_visibility(self):
+        self.content.setVisible(self.enabled and not self._collapsed)
+        chevron = "\u25B8" if self._collapsed else "\u25BE"
+        self.title.setText(f"{chevron}  {self._schema['label']}")
+        self._refresh_state()
+
+    def _on_enabled_toggled(self, _checked):
+        self._sync_visibility()
+        self.enabled_toggled.emit()
+
+    def _on_value_changed(self):
+        self._refresh_summary()
+        self.changed.emit()
+
+    def _refresh_summary(self):
+        self._summary_text = summarize(self.schema_key, self.get_values())
+        self.summary.setToolTip(self._summary_text)
+        self._elide_summary()
+
+    def _elide_summary(self):
+        self.summary.setText(self.summary.fontMetrics().elidedText(
+            self._summary_text, Qt.TextElideMode.ElideRight, max(0, self.summary.width())))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._elide_summary()
+
+    # ── Mouse: drag from the handle, click elsewhere on the header to collapse ──
+
+    def mousePressEvent(self, event):
+        if event.button() != Qt.MouseButton.LeftButton:
+            return super().mousePressEvent(event)
+        pos = event.position().toPoint()
+        child = self.childAt(pos)
+        self._press_pos = pos
+        if child is self.handle:
+            self._press_target = "handle"
+        elif child is not None and (child is self.header or self.header.isAncestorOf(child)):
+            self._press_target = "header"
+        else:
+            self._press_target = None
+        event.accept()
+
+    def mouseMoveEvent(self, event):
+        if self._press_target != "handle":
+            return super().mouseMoveEvent(event)
+        if (event.position().toPoint() - self._press_pos).manhattanLength() >= QApplication.startDragDistance():
+            self._press_target = None
+            self._start_drag()
+
+    def mouseReleaseEvent(self, event):
+        if self._press_target == "header" and self.header.geometry().contains(event.position().toPoint()):
+            self.set_collapsed(not self._collapsed)
+        self._press_target = None
+        super().mouseReleaseEvent(event)
+
+    def _start_drag(self):
+        drag = QDrag(self)
+        mime = QMimeData()
+        mime.setData(self.MIME_TYPE, b"")
+        drag.setMimeData(mime)
+
+        # Semi-transparent snapshot of the card
+        pixmap = self.grab()
+        faded = QPixmap(pixmap.size())
+        faded.setDevicePixelRatio(pixmap.devicePixelRatio())
+        faded.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(faded)
+        painter.setOpacity(0.7)
+        painter.drawPixmap(0, 0, pixmap)
+        painter.end()
+        drag.setPixmap(faded)
+        drag.setHotSpot(self._press_pos)
+
+        self.handle.setCursor(Qt.CursorShape.ClosedHandCursor)
+        drag.exec(Qt.DropAction.MoveAction)
+        self.handle.setCursor(Qt.CursorShape.OpenHandCursor)
+
+    def keyPressEvent(self, event):
+        # Only when the card itself has focus, not a slider or spin box inside it
+        if event.key() == Qt.Key.Key_Delete and self.hasFocus():
+            self.request_remove.emit(self)
+        else:
+            super().keyPressEvent(event)
+
 
 # ──────────────────────────────────────────────
-# Drop area for pipeline reordering
+# Card list: drop target with an insertion indicator
 # ──────────────────────────────────────────────
 
-class _DropArea(QWidget):
-    drop_reorder = Signal(object, int)
+class _CardList(QWidget):
+    drop_requested = Signal(object, int)  # card, insertion index among the cards
 
-    def __init__(self, parent=None):
-        super().__init__(parent)
+    def __init__(self, scroll_area):
+        super().__init__()
+        self._scroll_area = scroll_area
         self.setAcceptDrops(True)
+        self._indicator = QFrame(self)
+        self._indicator.setObjectName("dropIndicator")
+        self._indicator.setStyleSheet(f"background-color: {_ACCENT}; border: none;")
+        self._indicator.hide()
 
-    def dragEnterEvent(self, event: QDragEnterEvent):
-        if event.mimeData().hasFormat(DegradationBlock.MIME_TYPE):
+    def cards(self):
+        """Cards in layout order (the empty hint and the stretch are not counted)."""
+        layout = self.layout()
+        widgets = (layout.itemAt(i).widget() for i in range(layout.count()))
+        return [w for w in widgets if isinstance(w, StepCard)]
+
+    def drop_index(self, y):
+        cards = self.cards()
+        for i, card in enumerate(cards):
+            if y < card.y() + card.height() / 2:
+                return i
+        return len(cards)
+
+    def _accepts(self, event):
+        return event.mimeData().hasFormat(StepCard.MIME_TYPE) and event.source() in self.cards()
+
+    def dragEnterEvent(self, event):
+        if self._accepts(event):
             event.acceptProposedAction()
 
     def dragMoveEvent(self, event):
-        if event.mimeData().hasFormat(DegradationBlock.MIME_TYPE):
-            event.acceptProposedAction()
-
-    def dropEvent(self, event: QDropEvent):
-        if not event.mimeData().hasFormat(DegradationBlock.MIME_TYPE):
+        if not self._accepts(event):
             return
-        source = event.source()
-        if not isinstance(source, DegradationBlock):
-            return
-        layout = self.layout()
-        drop_y = event.position().y()
-        target_idx = layout.count() - 1
-        for i in range(layout.count() - 1):
-            item = layout.itemAt(i)
-            w = item.widget() if item else None
-            if w is not None:
-                mid = w.y() + w.height() / 2
-                if drop_y < mid:
-                    target_idx = i
-                    break
-        self.drop_reorder.emit(source, target_idx)
         event.acceptProposedAction()
+        pos = event.position().toPoint()
+        self._scroll_area.ensureVisible(pos.x(), pos.y(), 0, 48)  # auto-scroll near the edges
+        cards = self.cards()
+        idx = self.drop_index(pos.y())
+        gap = self.layout().spacing()
+        if idx < len(cards):
+            y = cards[idx].y() - (gap + 2) // 2
+        else:
+            y = cards[-1].geometry().bottom() + 1 + (gap - 2) // 2
+        margins = self.layout().contentsMargins()
+        self._indicator.setGeometry(margins.left(), max(0, y), self.width() - margins.left() - margins.right(), 2)
+        self._indicator.raise_()
+        self._indicator.show()
+
+    def dragLeaveEvent(self, event):
+        self._indicator.hide()
+
+    def dropEvent(self, event):
+        self._indicator.hide()
+        if self._accepts(event):
+            event.acceptProposedAction()
+            self.drop_requested.emit(event.source(), self.drop_index(event.position().y()))
 
 
 # ──────────────────────────────────────────────
@@ -452,148 +608,248 @@ class _DropArea(QWidget):
 # ──────────────────────────────────────────────
 
 class PipelinePanel(QWidget):
-    """Scrollable pipeline with styled add button and drag-and-drop."""
+    """Toolbar (add, load, save, copy HCL, clear) over a reorderable list of step cards."""
 
-    changed = Signal()
+    changed = Signal()     # any value / order / enable change (main debounces)
+    message = Signal(str)  # one-line feedback for the status bar
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.blocks = []
+        self.cards = []
+        self._preset_dir = ""
+        # Lets a stylesheet background (main names this panel #pipelinePanel) paint on a QWidget subclass
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        # ── Pipeline header ──
-        header = QWidget()
-        header.setStyleSheet("background-color: #1A1A1A;")
-        header_layout = QHBoxLayout(header)
-        header_layout.setContentsMargins(12, 8, 12, 8)
-        lbl = QLabel("PIPELINE")
-        lbl.setObjectName("headerLabel")
-        lbl.setStyleSheet("color: #666666; font-size: 10px; font-weight: 700; letter-spacing: 2px;")
-        header_layout.addWidget(lbl)
-        header_layout.addStretch()
-        root.addWidget(header)
+        # ── Toolbar ──
+        toolbar = QWidget()
+        toolbar.setObjectName("panelToolbar")
+        row = QHBoxLayout(toolbar)
+        row.setContentsMargins(8, 8, 8, 8)
+        row.setSpacing(4)
 
-        # ── Flow label: INPUT ──
-        input_lbl = QLabel("  INPUT")
-        input_lbl.setObjectName("dimLabel")
-        input_lbl.setFixedHeight(18)
-        input_lbl.setStyleSheet("color: #555555; font-size: 9px; padding-left: 12px; background: #1A1A1A;")
-        root.addWidget(input_lbl)
+        self.add_btn = QPushButton("+  Add step")
+        self.add_btn.setObjectName("addStepBtn")
+        self.add_btn.setToolTip("Add a degradation step")
+        self.add_btn.clicked.connect(self._show_add_menu)
+        row.addWidget(self.add_btn)
+        row.addStretch(1)
+        for text, tip, slot in (
+            ("Load", "Load a pipeline preset (.json)", self.request_load),
+            ("Save", "Save this pipeline as a preset (.json)", self.request_save),
+            ("Copy HCL", "Copy the enabled steps as wtp_dataset_destroyer HCL", self.copy_hcl),
+            ("Clear", "Remove all steps", self._confirm_clear),
+        ):
+            btn = QPushButton(text)
+            btn.setObjectName("toolBtn")
+            btn.setToolTip(tip)
+            btn.clicked.connect(slot)
+            row.addWidget(btn)
+        root.addWidget(toolbar)
 
-        # ── Scroll area ──
-        scroll_area = QScrollArea()
-        scroll_area.setWidgetResizable(True)
-        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.add_menu = AddStepMenu(self)
+        self.add_menu.step_chosen.connect(self.add_step)
 
-        self.scroll_content = _DropArea()
-        self.scroll_content.drop_reorder.connect(self._on_drop_reorder)
-        self.scroll_content.setStyleSheet("background-color: #1A1A1A;")
-        self.scroll_layout = QVBoxLayout(self.scroll_content)
-        self.scroll_layout.setContentsMargins(6, 2, 6, 2)
-        self.scroll_layout.setSpacing(2)
+        # ── Card list ──
+        self.scroll_area = QScrollArea()
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
-        # Empty state label
-        self.empty_label = QLabel("Add a degradation to begin")
-        self.empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.empty_label.setStyleSheet("color: #444444; font-size: 11px; padding: 24px;")
-        self.scroll_layout.addWidget(self.empty_label)
+        self.card_list = _CardList(self.scroll_area)
+        self.card_list.drop_requested.connect(self._on_drop)
+        self.list_layout = QVBoxLayout(self.card_list)
+        self.list_layout.setContentsMargins(8, 4, 8, 8)
+        self.list_layout.setSpacing(6)
 
-        self.scroll_layout.addStretch(1)
-        scroll_area.setWidget(self.scroll_content)
-        root.addWidget(scroll_area)
+        # Layout order: cards…, empty hint, stretch (card i sits at layout index i)
+        self.empty_hint = QLabel("No steps yet.\nUse \u201C+ Add step\u201D to build a degradation pipeline.")
+        self.empty_hint.setObjectName("emptyHint")
+        self.empty_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.empty_hint.setWordWrap(True)
+        self.list_layout.addWidget(self.empty_hint)
+        self.list_layout.addStretch(1)
 
-        # ── Flow label: OUTPUT ──
-        output_lbl = QLabel("  OUTPUT")
-        output_lbl.setObjectName("dimLabel")
-        output_lbl.setFixedHeight(18)
-        output_lbl.setStyleSheet("color: #555555; font-size: 9px; padding-left: 12px; background: #1A1A1A;")
-        root.addWidget(output_lbl)
+        self.scroll_area.setWidget(self.card_list)
+        # QScrollArea fills its viewport and widget with palette colours; let the panel background show
+        self.scroll_area.viewport().setAutoFillBackground(False)
+        self.card_list.setAutoFillBackground(False)
+        root.addWidget(self.scroll_area, 1)
 
-        # ── Add bar ──
-        add_area = QWidget()
-        add_area.setStyleSheet("background-color: #1A1A1A;")
-        add_layout = QHBoxLayout(add_area)
-        add_layout.setContentsMargins(8, 6, 8, 8)
-        add_layout.setSpacing(6)
-
-        self.type_combo = QComboBox()
-        for key in SCHEMA_ORDER:
-            self.type_combo.addItem(SCHEMAS[key]["label"], key)
-
-        self.add_btn = QPushButton("+ Add")
-        self.add_btn.setObjectName("addDegradation")
-        self.add_btn.clicked.connect(self._add_clicked)
-
-        add_layout.addWidget(self.type_combo, 1)
-        add_layout.addWidget(self.add_btn, 0)
-        root.addWidget(add_area)
-
-    def _add_clicked(self):
-        key = self.type_combo.currentData()
-        self.add_block(key)
-
-    def add_block(self, schema_key):
-        block = DegradationBlock(schema_key)
-        block.changed.connect(self.changed.emit)
-        block.request_move_up.connect(self._move_up)
-        block.request_move_down.connect(self._move_down)
-        block.request_delete.connect(self._delete)
-
-        self.blocks.append(block)
-        # Insert before the stretch (last item)
-        self.scroll_layout.insertWidget(self.scroll_layout.count() - 1, block)
-        self.empty_label.hide()
-        self.changed.emit()
-
-    def _move_up(self, block):
-        idx = self.blocks.index(block)
-        if idx <= 0:
-            return
-        self.blocks[idx], self.blocks[idx - 1] = self.blocks[idx - 1], self.blocks[idx]
-        self._rebuild_layout()
-        self.changed.emit()
-
-    def _move_down(self, block):
-        idx = self.blocks.index(block)
-        if idx >= len(self.blocks) - 1:
-            return
-        self.blocks[idx], self.blocks[idx + 1] = self.blocks[idx + 1], self.blocks[idx]
-        self._rebuild_layout()
-        self.changed.emit()
-
-    def _delete(self, block):
-        self.blocks.remove(block)
-        self.scroll_layout.removeWidget(block)
-        block.deleteLater()
-        if not self.blocks:
-            self.empty_label.show()
-        self.changed.emit()
-
-    def _on_drop_reorder(self, source_block, target_idx):
-        if source_block not in self.blocks:
-            return
-        old_idx = self.blocks.index(source_block)
-        self.blocks.pop(old_idx)
-        if target_idx > old_idx:
-            target_idx -= 1
-        target_idx = max(0, min(target_idx, len(self.blocks)))
-        self.blocks.insert(target_idx, source_block)
-        self._rebuild_layout()
-        self.changed.emit()
-
-    def _rebuild_layout(self):
-        for b in self.blocks:
-            self.scroll_layout.removeWidget(b)
-        for i, b in enumerate(self.blocks):
-            self.scroll_layout.insertWidget(i, b)
+    # ── Public API ──
 
     def get_configs(self):
-        configs = []
-        for b in self.blocks:
-            c = b.get_config()
-            if c is not None:
-                configs.append(c)
-        return configs
+        return [card.get_config() for card in self.cards if card.enabled]
+
+    def get_state(self):
+        return [card.get_state() for card in self.cards]
+
+    def set_state(self, state):
+        skipped = self._replace_cards(state)
+        if skipped:
+            self.message.emit(f"Skipped unknown step type(s): {', '.join(skipped)}")
+
+    def set_step_results(self, steps):
+        """Steps index into get_configs() order; a result whose type_key no longer matches is dropped."""
+        enabled = [card for card in self.cards if card.enabled]
+        results = {}
+        for step in steps:
+            if 0 <= step.index < len(enabled) \
+                    and getattr(step, "type_key", enabled[step.index].schema_key) == enabled[step.index].schema_key:
+                results[step.index] = step
+        for i, card in enumerate(enabled):
+            card.set_result(results.get(i))
+
+    def clear_step_results(self):
+        for card in self.cards:
+            card.set_result(None)
+
+    def add_step(self, schema_key):
+        card = self._wire(StepCard(schema_key))
+        self._insert(len(self.cards), card)
+        self._structure_changed()
+        card.setFocus()
+        QTimer.singleShot(0, lambda: self.scroll_area.ensureWidgetVisible(card))
+
+    def clear_all(self):
+        """Remove every step immediately (the toolbar's Clear button asks first)."""
+        if not self.cards:
+            return
+        for card in self.cards:
+            self._discard(card)
+        self.cards.clear()
+        self._structure_changed()
+
+    def request_save(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save pipeline preset", os.path.join(self._preset_dir, "pipeline.json"), _PRESET_FILTER)
+        if not path:
+            return
+        self._preset_dir = os.path.dirname(path)
+        try:
+            save_preset(path, self.get_state())
+        except OSError as exc:
+            QMessageBox.warning(self, "Save failed", f"Could not save {path}:\n{exc}")
+            return
+        self.message.emit(f"Saved {len(self.cards)} step(s) to {os.path.basename(path)}")
+
+    def request_load(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Load pipeline preset", self._preset_dir, _PRESET_FILTER)
+        if not path:
+            return
+        self._preset_dir = os.path.dirname(path)
+        try:
+            skipped = self._replace_cards(load_preset(path))
+        except (OSError, ValueError, TypeError) as exc:
+            QMessageBox.warning(self, "Load failed", f"Could not load {path}:\n{exc}")
+            return
+        text = f"Loaded {len(self.cards)} step(s) from {os.path.basename(path)}"
+        if skipped:
+            text += f"; skipped unknown type(s): {', '.join(skipped)}"
+        self.message.emit(text)
+
+    def copy_hcl(self):
+        configs = self.get_configs()
+        if not configs:
+            self.message.emit("Nothing to copy: no enabled steps")
+            return
+        QApplication.clipboard().setText(to_hcl(configs))
+        self.message.emit(f"Copied {len(configs)} step(s) as HCL to the clipboard")
+
+    # ── Internals ──
+
+    def _show_add_menu(self):
+        self.add_menu.popup_below(self.add_btn)
+
+    def _confirm_clear(self):
+        if not self.cards:
+            return
+        answer = QMessageBox.question(self, "Clear pipeline", f"Remove all {len(self.cards)} step(s)?")
+        if answer == QMessageBox.StandardButton.Yes:
+            self.clear_all()
+
+    def _wire(self, card):
+        card.changed.connect(self.changed.emit)
+        card.enabled_toggled.connect(self._structure_changed)
+        card.request_move.connect(self._move)
+        card.request_duplicate.connect(self._duplicate)
+        card.request_remove.connect(self._remove)
+        for widget in card.param_widgets.values():
+            for control in widget.controls:
+                control.setFocusPolicy(Qt.FocusPolicy.StrongFocus)  # no focus-by-wheel
+                control.installEventFilter(self)
+        return card
+
+    def eventFilter(self, obj, event):
+        # The wheel scrolls the list unless the control under the cursor has focus
+        if event.type() == QEvent.Type.Wheel and not obj.hasFocus():
+            QApplication.sendEvent(self.scroll_area.verticalScrollBar(), event)
+            return True
+        return super().eventFilter(obj, event)
+
+    def _replace_cards(self, state):
+        """Build cards for `state` (all or nothing), swap them in; return the skipped type names."""
+        new_cards, skipped = [], []
+        for step in state:
+            if not isinstance(step, dict) or step.get("type") not in SCHEMAS:
+                skipped.append(str(step.get("type") if isinstance(step, dict) else step))
+                continue
+            card = StepCard(step["type"])
+            card.apply_state(step)
+            new_cards.append(card)
+        for card in self.cards:
+            self._discard(card)
+        self.cards.clear()
+        for card in new_cards:
+            self._insert(len(self.cards), self._wire(card))
+        self._structure_changed()
+        return skipped
+
+    def _insert(self, index, card):
+        self.cards.insert(index, card)
+        self.list_layout.insertWidget(index, card)
+
+    def _discard(self, card):
+        self.list_layout.removeWidget(card)
+        card.hide()
+        card.deleteLater()
+
+    def _structure_changed(self):
+        self.empty_hint.setVisible(not self.cards)
+        self.clear_step_results()  # result indexes are stale after add/remove/reorder/toggle
+        self.changed.emit()
+
+    def _move_to(self, card, index):
+        self.cards.remove(card)
+        self.list_layout.removeWidget(card)
+        self._insert(index, card)
+        self._structure_changed()
+
+    def _move(self, card, delta):
+        index = self.cards.index(card) + delta
+        if 0 <= index < len(self.cards):
+            self._move_to(card, index)
+
+    def _on_drop(self, card, target):
+        index = self.cards.index(card)
+        if target > index:
+            target -= 1
+        if target != index:
+            self._move_to(card, target)
+
+    def _duplicate(self, card):
+        copy = StepCard(card.schema_key)
+        copy.apply_state(card.get_state())
+        self._insert(self.cards.index(card) + 1, self._wire(copy))
+        self._structure_changed()
+
+    def _remove(self, card):
+        index = self.cards.index(card)
+        self.cards.remove(card)
+        self._discard(card)
+        self._structure_changed()
+        if self.cards:  # keep keyboard flow: focus the neighbour so Delete can repeat
+            self.cards[min(index, len(self.cards) - 1)].setFocus()
