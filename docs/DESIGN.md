@@ -102,5 +102,9 @@ Per lane: import smoke + `tests/test_degradations.py` where relevant. Final gate
 - 3.14 blocker: pepeline 0.3.14 and dataset-support 0.1.4 have no cp314 wheels (and no pyo3-3.14 source path). Ruling: port to pepeline 1.x (abi3) and replace dataset-support's two functions with numpy (branch `lane-e-pepeline1`, merged after Lane C); the noise types opensimplex/simplex are dropped because 1.x lacks them.
 - Single working tree, disjoint files per lane (venv is in-tree; worktrees would lack it).
 
+- pepeline 1.x `noise()` has no seed argument: perlin/opensimplex/supersimplex re-roll on every run even with a fixed seed (gauss/uniform/salt types are reproducible). Accepted for this release; follow-up: numpy fractal noise with a seed.
+- Channel shift YUV mode: pepeline's BT.2020 YCbCr->RGB has a wrong green coefficient (tint up to 0.17 at zero shift); replaced by a numpy inverse in `shift_degr.py`, verified identity at zero shift.
+- OWNER QUEUE: `vendor/chainner_ext/chainner_native.dll` contains GPL-3.0 code ported from chaiNNer while this repo is MIT; publishing it this way is the owner's call (see `vendor/PROVENANCE.md`). Also: install official CPython 3.14 and recreate the venv so it no longer depends on chaiNNer-C's runtime folder; delete `venv_old312` (about 5 GB) when satisfied.
+
 ## STATUS
 - [ ] A panel · [ ] B preview · [ ] C engine+pipeline+tests · [ ] D style+README · [ ] main.pyw · [ ] final gate · [ ] commit

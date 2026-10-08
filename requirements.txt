@@ -1,10 +1,21 @@
-PySide6>=6.5.0
-Pillow>=10.0.0
-# The following are required by wtp_dataset_destroyer's degradation pipeline.
-chainner-ext~=0.3.9
-dataset-support~=0.1.4
-numpy~=1.26.4
-opencv-python~=4.10.0
-pepeline~=0.3.11
-pepedpid~=0.1.1
-colour-science==0.4.6
+# WTP Degradation Preview - Python 3.14 (64-bit, Windows).
+# install.bat installs this file with --only-binary=:all: (no source builds).
+# chainner_ext is not listed: it is vendored under vendor\ (C rewrite for CPython 3.14).
+
+# PyTorch CUDA 13.0 wheels (torch==2.11.* resolves to 2.11.x+cu130 from this index).
+--extra-index-url https://download.pytorch.org/whl/cu130
+
+PySide6>=6.11,<6.12
+Pillow>=12.0,<13
+numpy>=2.0,<3
+opencv-python>=4.11,<5
+colour-science>=0.4.7,<0.5
+av>=17,<18
+torch==2.11.*
+# Optional video backend for the compression degradation; its version must match torch.
+torchcodec==0.11.*
+tqdm>=4.66,<5
+
+# Degradation pipeline (wtp_dataset_destroyer).
+pepeline>=1.0,<2
+pepedpid>=0.1.2,<0.2

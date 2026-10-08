@@ -7,6 +7,13 @@ if not exist "%~dp0venv\Scripts\pythonw.exe" (
     exit /b 1
 )
 
+"%~dp0venv\Scripts\python.exe" -c "import sys; sys.exit(0 if sys.version_info[:2] == (3, 14) else 1)" >nul 2>&1
+if errorlevel 1 (
+    echo The venv is not Python 3.14. Delete the venv folder and run install.bat again.
+    pause
+    exit /b 1
+)
+
 if exist "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat" (
     call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
 ) else if exist "C:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat" (

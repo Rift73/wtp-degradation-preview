@@ -3,3 +3,5 @@ __pycache__/
 **/__pycache__/
 config.json
 wtp_preview.log
+venv_old312/
+venv314/
