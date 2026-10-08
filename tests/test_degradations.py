@@ -530,6 +530,68 @@ def test_nlmeans_kernel_matches_fallback():
     assert float((kernel - fallback).abs().max()) < 1e-5
 
 
+def test_dither_kernel_matches_chainner_ext():
+    if _torch_cuda() is None:
+        print("  SKIP: no CUDA device")
+        return
+    from unittest import mock
+    from chainner_ext import UniformQuantization, error_diffusion_dither
+    from pipeline.constants import DITHERING_MAP
+    from pipeline.process import dithering_degr
+    from pipeline.utils.registry import get_class
+
+    if not dithering_degr._HAS_CUDA_DIFFUSION:
+        print("  SKIP: no cached build and no compiler")
+        return
+    problems = []
+    # chainner_ext is stubbed out of the step, so every output below is the kernel's
+    with mock.patch.object(dithering_degr, "error_diffusion_dither",
+                           side_effect=AssertionError("the step used chainner_ext")):
+        for height, width in ((128, 128), (257, 131)):
+            yy, xx = np.mgrid[0:height, 0:width].astype(np.float32)
+            ramp = 0.85 * xx / (width - 1) + 0.15 * yy / (height - 1)
+            images = {
+                "random": np.random.default_rng(height + width).random(
+                    (height, width, 3), dtype=np.float32),
+                "gradient": np.stack([ramp, 1 - ramp, 0.5 * ramp + 0.25], -1),
+            }
+            for kind, rgb in images.items():
+                for img in (rgb, rgb[..., 0].copy()):  # gray rounds per scalar
+                    for name, algorithm in DITHERING_MAP.items():
+                        for levels in (2, 3, 7, 16, 64):
+                            cfg = _config("dithering", dithering_type=name, color_ch=levels)
+                            lq, _ = get_class("dithering")(cfg).run(img.copy(), img)
+                            expected = np.squeeze(error_diffusion_dither(
+                                img, UniformQuantization(levels), algorithm))
+                            if not np.array_equal(lq.view(np.uint32), expected.view(np.uint32)):
+                                problems.append(f"{name} {kind} {img.shape} levels {levels}")
+    assert not problems, "\n".join(problems)
+
+
+def test_dither_kernel_failure_falls_back():
+    if _torch_cuda() is None:
+        print("  SKIP: no CUDA device")
+        return
+    from unittest import mock
+    from chainner_ext import UniformQuantization, error_diffusion_dither
+    from pipeline.constants import DITHERING_MAP
+    from pipeline.process import dithering_degr
+    from pipeline.utils.registry import get_class
+
+    img = _image(48)
+    cfg = _config("dithering", dithering_type="burkes", color_ch=4)
+    expected = error_diffusion_dither(img, UniformQuantization(4), DITHERING_MAP["burkes"])
+    with mock.patch.object(dithering_degr, "_HAS_CUDA_DIFFUSION", True), \
+            mock.patch.object(dithering_degr, "_DIFFUSION_FALLBACK_LOGGED", False), \
+            mock.patch.object(dithering_degr, "error_diffusion_dither_cuda", create=True,
+                              side_effect=RuntimeError("no kernel")), \
+            mock.patch.object(dithering_degr.logging, "warning") as warning:
+        for _ in range(2):
+            lq, _ = get_class("dithering")(cfg).run(img.copy(), img)
+            assert np.array_equal(lq, expected)
+    assert warning.call_count == 1, "the fallback must be logged once"
+
+
 def test_cuda_ext_skips_build_without_compiler():
     if sys.platform != "win32":
         print("  SKIP: the cl.exe check is Windows-only")
