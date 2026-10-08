@@ -209,7 +209,7 @@ def _summary_noise(p):
 
 _reg("noise", "Noise", [
     {"key": "type_noise", "label": "Noise Type", "type": "choice",
-     "options": ["uniform", "gauss", "perlin", "opensimplex", "simplex",
+     "options": ["uniform", "gauss", "perlin", "opensimplex",
                  "supersimplex", "salt", "pepper", "salt_and_pepper"],
      "default": "gauss",
      "help": "Noise distribution: per-pixel (uniform, gauss), procedural "

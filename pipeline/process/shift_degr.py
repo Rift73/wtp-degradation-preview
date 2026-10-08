@@ -1,6 +1,6 @@
 import numpy as np
 import cv2 as cv
-from pepeline import cvt_color, CvtType
+from pepeline import cvt_color, CVTColor
 from .utils import probability
 from numpy import random
 
@@ -180,11 +180,11 @@ class Shift:
         Returns:
         np.ndarray: The shifted image.
         """
-        yuv_img = cvt_color(img, CvtType.RGB2YCvCrBt2020)
+        yuv_img = cvt_color(img, CVTColor.RGB2YCbCR_2020)
         for c in range(3):
             channel_amount = self.yuv_amount_list[c]
             yuv_img[:, :, c] = self.shift_channel(yuv_img[:, :, c], channel_amount, [1])
-        return cvt_color(yuv_img, CvtType.YCvCr2RGBBt2020)
+        return cvt_color(yuv_img, CVTColor.YCbCR2RGB_2020)
 
     def __cmyk_chanel_shift(self, img: np.ndarray) -> np.ndarray:
         """
@@ -196,13 +196,13 @@ class Shift:
         Returns:
         np.ndarray: The shifted image.
         """
-        cmyk_img = cvt_color(img, CvtType.RGB2CMYK)
+        cmyk_img = cvt_color(img, CVTColor.RGB2CMYK)
         for c in range(4):
             channel_amount = self.cmyk_amount_list[c]
             cmyk_img[:, :, c] = self.shift_channel(
                 cmyk_img[:, :, c], channel_amount, [0]
             )
-        return cvt_color(cmyk_img, CvtType.CMYK2RGB)
+        return cvt_color(cmyk_img, CVTColor.CMYK2RGB)
 
     def run(self, lq: np.ndarray, hq: np.ndarray) -> (np.ndarray, np.ndarray):
         """
