@@ -92,4 +92,4 @@ docs/               # Design notes for the UI
 
 ## License
 
-[MIT](LICENSE)
+[MIT](LICENSE) for this project. The vendored `vendor/chainner_ext/` module is the author's C build from chaiNNer-C and contains GPL-3.0 code; see `vendor/PROVENANCE.md` and the licence files next to it.

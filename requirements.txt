@@ -12,8 +12,6 @@ opencv-python>=4.11,<5
 colour-science>=0.4.7,<0.5
 av>=17,<18
 torch==2.11.*
-# Optional video backend for the compression degradation; its version must match torch.
-torchcodec==0.11.*
 tqdm>=4.66,<5
 
 # Degradation pipeline (wtp_dataset_destroyer).

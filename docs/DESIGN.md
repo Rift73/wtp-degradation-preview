@@ -106,5 +106,9 @@ Per lane: import smoke + `tests/test_degradations.py` where relevant. Final gate
 - Channel shift YUV mode: pepeline's BT.2020 YCbCr->RGB has a wrong green coefficient (tint up to 0.17 at zero shift); replaced by a numpy inverse in `shift_degr.py`, verified identity at zero shift.
 - OWNER QUEUE: `vendor/chainner_ext/chainner_native.dll` contains GPL-3.0 code ported from chaiNNer while this repo is MIT; publishing it this way is the owner's call (see `vendor/PROVENANCE.md`). Also: install official CPython 3.14 and recreate the venv so it no longer depends on chaiNNer-C's runtime folder; delete `venv_old312` (about 5 GB) when satisfied.
 
+- Owner 2026-10-09 (second pass): publish with the GPL'd vendored module as is; owner deletes `venv_old312`; the venv must not depend on chaiNNer-C's runtime -> official CPython 3.14.8 installed per-user (PSF-signed installer, verified) and the venv recreated by `install.bat`. `py` now defaults to 3.14 on this machine.
+- torchcodec removed from compress and requirements: it can never load here (PyAV's FFmpeg DLLs are name-mangled, the FFmpeg build is static) and PyAV covers all seven codecs in-process, which is chaiNNer's own child-process approach done in-process.
+- install.bat/run.bat were LF-ended and cmd misparsed them; now CRLF with ASCII comments, pinned by `.gitattributes`.
+
 ## STATUS
 - [ ] A panel · [ ] B preview · [ ] C engine+pipeline+tests · [ ] D style+README · [ ] main.pyw · [ ] final gate · [ ] commit

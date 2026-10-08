@@ -21,25 +21,7 @@ try:
 except ImportError:
     _HAS_PYAV = False
 
-# torchcodec raises RuntimeError (not ImportError) when it finds no loadable
-# shared FFmpeg libraries; PyAV or the ffmpeg CLI then handle the video codecs.
-try:
-    import torch
-    from torchcodec.encoders import VideoEncoder
-    from torchcodec.decoders import VideoDecoder
-    _HAS_TORCHCODEC = True
-except Exception:
-    _HAS_TORCHCODEC = False
-
-# Chroma formats from most to least color resolution
 _CHROMA_ORDER = ["yuv444p", "yuv422p", "yuv420p"]
-
-# TorchCodec codec name + container format mapping
-_TC_CODEC_MAP = {
-    "h264": ("libx264", "mp4"),
-    "hevc": ("libx265", "mp4"),
-    "mpeg4": ("mpeg4", "mp4"),
-}
 
 
 @register_class("compress")
@@ -141,55 +123,6 @@ class Compress:
         logging.debug(f"Compress - {codec} (PyAV) subsampling: {sampling}")
         return result[:orig_height, :orig_width, :]
 
-    def __video_core_torchcodec(
-        self, lq: np.ndarray, codec_key: str, quality: int
-    ) -> np.ndarray:
-        """In-process video codec roundtrip via TorchCodec.
-
-        Fastest path for h264/hevc/mpeg4. Native tensor I/O,
-        single encode call, no subprocess. Intra-only (gop=1, bf=0)
-        for semantic equivalence with per-image compression.
-        """
-        orig_height, orig_width = lq.shape[:2]
-        sampling = random.choice(self.video_sampling)
-        pix_fmt = VIDEO_SUBSAMPLING.get(sampling, "yuv420p")
-
-        # Pad to even dims if needed by chroma subsampling
-        need_w = 2 if "420" in pix_fmt or "422" in pix_fmt else 1
-        need_h = 2 if "420" in pix_fmt else 1
-        pad_w = (need_w - orig_width % need_w) % need_w
-        pad_h = (need_h - orig_height % need_h) % need_h
-        if pad_h or pad_w:
-            lq = np.pad(lq, ((0, pad_h), (0, pad_w), (0, 0)), mode="reflect")
-
-        codec_name, fmt = _TC_CODEC_MAP[codec_key]
-
-        # HWC uint8 → CHW → NCHW tensor (batch=1)
-        tensor = torch.from_numpy(lq.transpose(2, 0, 1)).unsqueeze(0)
-
-        # Intra-only encoding: gop=1 ensures no inter-frame prediction
-        extra_options: dict[str, str] = {"g": "1", "bf": "0"}
-        if codec_name == "libx264":
-            extra_options["preset"] = "ultrafast"
-        elif codec_name == "libx265":
-            extra_options["preset"] = "ultrafast"
-            extra_options["x265-params"] = "log-level=0"
-
-        enc = VideoEncoder(frames=tensor, frame_rate=1)
-        encode_kwargs: dict = {
-            "format": fmt,
-            "codec": codec_name,
-            "crf": quality,
-            "pixel_format": pix_fmt,
-            "extra_options": extra_options,
-        }
-        encoded = enc.to_tensor(**encode_kwargs)
-
-        dec = VideoDecoder(encoded)
-        result = dec[0].numpy().transpose(1, 2, 0)  # CHW → HWC uint8
-
-        logging.debug(f"Compress - {codec_key} (TorchCodec) subsampling: {pix_fmt}")
-        return result[:orig_height, :orig_width, :]
 
     def __video_core(
         self, lq: np.ndarray, codec: str, output_args: list, container: str = "mpeg"
@@ -274,8 +207,6 @@ class Compress:
         return frame_data[:orig_height, :orig_width, :]
 
     def __h264(self, lq: np.ndarray, quality: int) -> np.ndarray:
-        if _HAS_TORCHCODEC:
-            return self.__video_core_torchcodec(lq, "h264", quality)
         if _HAS_PYAV:
             return self.__video_core_pyav(
                 lq, "libx264", {"preset": "ultrafast", "crf": str(quality)}, "mp4"
@@ -284,8 +215,6 @@ class Compress:
         return self.__video_core(lq, "h264", output_args)
 
     def __hevc(self, lq: np.ndarray, quality: int) -> np.ndarray:
-        if _HAS_TORCHCODEC:
-            return self.__video_core_torchcodec(lq, "hevc", quality)
         if _HAS_PYAV:
             return self.__video_core_pyav(
                 lq, "libx265",
@@ -296,7 +225,6 @@ class Compress:
         return self.__video_core(lq, "hevc", output_args)
 
     def __mpeg2(self, lq: np.ndarray, quality: int) -> np.ndarray:
-        # TorchCodec can't decode MPEG2 — use PyAV
         if _HAS_PYAV:
             return self.__video_core_pyav(
                 lq, "mpeg2video",
@@ -309,8 +237,6 @@ class Compress:
         return self.__video_core(lq, "mpeg2video", output_args)
 
     def __mpeg4(self, lq: np.ndarray, quality: int) -> np.ndarray:
-        if _HAS_TORCHCODEC:
-            return self.__video_core_torchcodec(lq, "mpeg4", quality)
         if _HAS_PYAV:
             return self.__video_core_pyav(
                 lq, "mpeg4",
@@ -323,7 +249,6 @@ class Compress:
         return self.__video_core(lq, "mpeg4", output_args)
 
     def __vp9(self, lq: np.ndarray, quality: int) -> np.ndarray:
-        # TorchCodec can't pass VP9 speed option — use PyAV
         if _HAS_PYAV:
             return self.__video_core_pyav(
                 lq, "libvpx-vp9",

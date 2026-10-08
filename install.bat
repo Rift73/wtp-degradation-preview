@@ -7,7 +7,7 @@ echo  WTP Degradation Preview - Install
 echo ========================================
 echo.
 
-:: ── Check Python 3.14 (64-bit) ──
+:: -- Check Python 3.14 (64-bit) --
 py -3.14 -c "import sys; sys.exit(0 if sys.maxsize > 2**32 else 1)" >nul 2>&1
 if errorlevel 1 (
     echo [ERROR] 64-bit Python 3.14 was not found.
@@ -19,7 +19,7 @@ if errorlevel 1 (
 for /f "tokens=2 delims= " %%v in ('py -3.14 --version 2^>^&1') do set PYVER=%%v
 echo Found Python %PYVER%
 
-:: ── Create venv ──
+:: -- Create venv --
 set "VENV_PY=%~dp0venv\Scripts\python.exe"
 if exist "%VENV_PY%" (
     "%VENV_PY%" -c "import sys; sys.exit(0 if sys.version_info[:2] == (3, 14) else 1)" >nul 2>&1
@@ -40,7 +40,7 @@ if exist "%VENV_PY%" (
     )
 )
 
-:: ── Install dependencies ──
+:: -- Install dependencies --
 echo.
 echo Installing dependencies (PyTorch with CUDA is about 3 GB)...
 "%VENV_PY%" -m pip install --upgrade pip >nul 2>&1
@@ -51,7 +51,7 @@ if errorlevel 1 (
     exit /b 1
 )
 
-:: ── Vendored chainner_ext (C build for Python 3.14): make vendor\ importable ──
+:: -- Vendored chainner_ext (C build for Python 3.14): make vendor\ importable --
 "%VENV_PY%" -c "import pathlib, sys, sysconfig; pathlib.Path(sysconfig.get_paths()['purelib'], 'wtp_vendor.pth').write_text(str(pathlib.Path(sys.argv[1]).resolve()) + '\n', encoding='utf-8')" "%~dp0vendor"
 if errorlevel 1 (
     echo [ERROR] Failed to register the vendor folder.
@@ -59,7 +59,7 @@ if errorlevel 1 (
     exit /b 1
 )
 
-:: ── Check imports ──
+:: -- Check imports --
 "%VENV_PY%" -W ignore -c "import PySide6, cv2, numpy, torch, av, colour, pepeline, pepedpid, chainner_ext"
 if errorlevel 1 (
     echo [ERROR] Packages installed, but an import failed - see the error above.
