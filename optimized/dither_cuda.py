@@ -1,10 +1,10 @@
 """Exact CUDA error-diffusion dithering with lazy extension build.
 
 The sources are the owner's traiNNer fork's (the .cu adds a Windows-only
-#undef): bit-identical to chainner_ext's error_diffusion_dither with
-UniformQuantization, one block per channel plane. The extension also carries the fork's Riemersma kernel, which
-the GUI leaves to chainner_ext: it dithers one image at a time, and a single
-Hilbert walk is slower on one GPU thread than on a CPU core.
+#undef): bit-identical to chainner_ext's error_diffusion_dither and
+riemersma_dither with UniformQuantization, one block per channel plane.
+Riemersma is one Hilbert walk per plane; on Windows it still beats
+chainner_ext for a single image (2048x2048: 239 -> 213 ms).
 
 The build is cached per user (see cuda_ext); without a cached build and without
 cl.exe the import fails, and callers keep chainner_ext.
@@ -12,6 +12,7 @@ cl.exe the import fails, and callers keep chainner_ext.
 
 from __future__ import annotations
 
+import functools
 import os
 import threading
 
@@ -75,3 +76,33 @@ def error_diffusion_dither_cuda(x: Tensor, levels: int, algorithm: int) -> Tenso
     ext = _load_ext()
     per_image = torch.full((x.shape[0],), levels, dtype=torch.int64, device=x.device)
     return ext.error_diffusion(x.contiguous(), per_image, algorithm)
+
+
+@functools.lru_cache(maxsize=8)
+def _riemersma_order(height: int, width: int, device: str) -> tuple[Tensor, Tensor]:
+    """The Hilbert traversal order and its inverse permutation, built once per size."""
+    order, inverse = _load_ext().riemersma_order(height, width)
+    return order.to(device), inverse.to(device)
+
+
+def riemersma_dither_cuda(x: Tensor, levels: int, history: int, decay_ratio: float) -> Tensor:
+    """Riemersma dither a BCHW float32 CUDA tensor with 1, 3 or 4 channels.
+
+    Args:
+        x: BCHW float32 CUDA tensor; made contiguous, as the kernel reads planes.
+        levels: Quantization levels per channel (at least 2), for every image.
+        history: History length (at least 2).
+        decay_ratio: Weight of the oldest history entry, in (0, 1).
+
+    Returns:
+        New dithered tensor of the same shape, values in [0, 1].
+    """
+    if levels < 2:
+        raise ValueError("The quantization level count must be at least 2.")
+    if history < 2:
+        raise ValueError("The history length must be at least 2.")
+    ext = _load_ext()
+    src = x.contiguous()
+    order, inverse = _riemersma_order(src.shape[2], src.shape[3], str(src.device))
+    per_image = torch.full((src.shape[0],), levels, dtype=torch.int64, device=src.device)
+    return ext.riemersma(src, per_image, order, inverse, history, decay_ratio)

@@ -123,3 +123,16 @@ Measured with the profile harness (median of 3 after warm-up; `docs/perf-before.
 - hf_noise 316 -> 23 ms (Beta sampling on the GPU, seeded). NLMeans CUDA kernel had NEVER compiled (CUDA 13 headers need `/Zc:preprocessor` under MSVC); fixed, builds cached under `%LOCALAPPDATA%\wtp_preview	orch_ext`, second launch 8.5 s -> 0.14 s; without MSVC the fallback is now silent.
 - UI: uint8 conversion moved into the worker; the HQ pixmap is reused when HQ's bytes did not change.
 - Decisions: no pinned-memory downloads (2-4 ms per step for up to 1 GB page-locked RAM); riemersma, codecs and GPU-resident chains left alone.
+
+### CUDA dithering in the GUI (2026-10-09, kernel shared with the traiNNer fork)
+Exact error-diffusion and riemersma kernels (bit-identical to chainner_ext, 320 + 225 cases on Windows), built on
+first use through `cuda_ext` (Windows needs `#undef small`: the SDK's rpcndr.h defines it as `char`). Single image,
+8 levels, median of 50 (`cpu` = chainner_ext, `step` = kernel incl. upload/download):
+
+| size | floydsteinberg | stucki | sierra | riemersma |
+|---|---|---|---|---|
+| 1024² | 17.5 → 4.1 ms | 32.8 → 4.5 | 29.5 → 4.5 | 59.5 → 37.8 |
+| 2048² | 78.0 → 14.7 ms | 125.5 → 16.3 | 116.0 → 16.3 | 239.1 → 213.4 |
+
+Riemersma goes to the kernel in the GUI too (on Windows chainner_ext's riemersma is slower than on Linux, so the
+single-thread kernel still wins 1.1-1.6x); in traiNNer it is routed to the kernel from batch 2 upward.
