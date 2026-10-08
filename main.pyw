@@ -14,6 +14,8 @@ import json
 import random
 import logging
 
+import numpy as np
+
 # ── Bootstrap imports ──
 _OWN_DIR = os.path.dirname(os.path.abspath(__file__))
 if _OWN_DIR not in sys.path:
@@ -79,6 +81,9 @@ class MainWindow(QMainWindow):
         self.cfg = _load_config()
         self.source_image = None
         self.source_name = ""
+        self._source_pixmap = None
+        self._last_hq_u8 = None
+        self._last_hq_pixmap = None
         self.last_dir = self.cfg.get("last_dir", "")
         self._last_error = ""
         self._has_ffmpeg = restore_ffmpeg(self.cfg)
@@ -292,6 +297,9 @@ class MainWindow(QMainWindow):
         dims = _dims_str(img)
         self.image_label.setText(f"{self.source_name}  ·  {dims}")
         pm = numpy_to_qpixmap(img)
+        self._source_pixmap = pm
+        self._last_hq_u8 = None
+        self._last_hq_pixmap = None
         self.preview.set_images(pm, pm, dims, dims)
         self.preview.zoom_fit()
         self._status(f"Loaded {self.source_name}  {dims}")
@@ -312,7 +320,7 @@ class MainWindow(QMainWindow):
         configs = self.pipeline.get_configs()
         if not configs:
             dims = _dims_str(self.source_image)
-            pm = numpy_to_qpixmap(self.source_image)
+            pm = self._source_pixmap
             self.preview.set_images(pm, pm, dims, dims)
             self.pipeline.clear_step_results()
             self._set_error("")
@@ -326,15 +334,23 @@ class MainWindow(QMainWindow):
     def _on_result(self, result):
         hq_dims = _dims_str(result.hq)
         lq_dims = _dims_str(result.lq)
-        self.preview.set_images(
-            numpy_to_qpixmap(result.hq), numpy_to_qpixmap(result.lq), hq_dims, lq_dims,
-        )
+        # Reuse a pixmap whenever HQ's bytes did not change, so the view keeps its
+        # scaled cache: the source pixmap when no step touched HQ, else the last one.
+        if not result.hq_changed:
+            hq_pm = self._source_pixmap
+        elif self._last_hq_u8 is not None and self._last_hq_u8.shape == result.hq_u8.shape                 and np.array_equal(self._last_hq_u8, result.hq_u8):
+            hq_pm = self._last_hq_pixmap
+        else:
+            hq_pm = numpy_to_qpixmap(result.hq_u8)
+            self._last_hq_u8, self._last_hq_pixmap = result.hq_u8, hq_pm
+        self.preview.set_images(hq_pm, numpy_to_qpixmap(result.lq_u8), hq_dims, lq_dims)
         self.pipeline.set_step_results(result.steps)
 
         failed = [s for s in result.steps if s.error]
         n = len(result.steps)
         plural = "s" if n != 1 else ""
-        summary = f"{n} step{plural} · {result.total_ms:.0f} ms · seed {result.seed}"
+        cached = f" · {result.cached_steps} cached" if result.cached_steps else ""
+        summary = f"{n} step{plural} · {result.total_ms:.0f} ms{cached} · seed {result.seed}"
         if failed:
             first = failed[0]
             self._set_error("\n\n".join(f"[{s.type_key}] {s.error}" for s in failed))

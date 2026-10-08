@@ -424,7 +424,7 @@ class StepCard(QFrame):
             widget.value = widget.default
 
     def set_result(self, step):
-        """Show a run result (an object with elapsed_ms / error / error_summary) or idle for None."""
+        """Show a run result (an object with elapsed_ms / error / error_summary / cached) or idle for None."""
         if step is None:
             self._result_state = ""
             tip = "Not run yet"
@@ -433,6 +433,9 @@ class StepCard(QFrame):
             lines = step.error.strip().splitlines() or ["Error"]
             summary = step.error_summary or lines[-1]
             tip = f"<b>{escape(summary)}</b><pre>{escape(step.error.strip())}</pre>"
+        elif getattr(step, "cached", False):
+            self._result_state = "ok"
+            tip = "cached (unchanged since the last run)"
         else:
             self._result_state = "ok"
             ms = step.elapsed_ms
