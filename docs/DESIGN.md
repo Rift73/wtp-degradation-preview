@@ -114,3 +114,12 @@ Per lane: import smoke + `tests/test_degradations.py` where relevant. Final gate
 
 ## STATUS
 - [ ] A panel · [ ] B preview · [ ] C engine+pipeline+tests · [ ] D style+README · [ ] main.pyw · [ ] final gate · [ ] commit
+
+## Performance pass (2026-10-09, owner: "obvious optimisation", under 2 h)
+Measured with the profile harness (median of 3 after warm-up; `docs/perf-before.txt` vs `docs/perf-after.txt`):
+- all-24-defaults chain: 2048² 1334 -> 793 ms; 1024² 326 -> 202 ms. A slider edit on step k now re-runs only steps k..n (engine prefix cache, bit-identical to a cold run, 1.5 GB budget): last-step edit at 2048² 670 -> 29 ms.
+- noise: simplex 1857 -> 45 ms, perlin 488 -> 30, gauss 204 -> 29 (torch generators, exact match to the numpy reference; float32 block draws); Y/UV modes 524/935 -> 37/58.
+- GPU steps 33 -> 18-20 ms per profile row (6 ms step cost; the rest is the harness's own copies); one shared upload/download helper, outputs byte-identical.
+- hf_noise 316 -> 23 ms (Beta sampling on the GPU, seeded). NLMeans CUDA kernel had NEVER compiled (CUDA 13 headers need `/Zc:preprocessor` under MSVC); fixed, builds cached under `%LOCALAPPDATA%\wtp_preview	orch_ext`, second launch 8.5 s -> 0.14 s; without MSVC the fallback is now silent.
+- UI: uint8 conversion moved into the worker; the HQ pixmap is reused when HQ's bytes did not change.
+- Decisions: no pinned-memory downloads (2-4 ms per step for up to 1 GB page-locked RAM); riemersma, codecs and GPU-resident chains left alone.

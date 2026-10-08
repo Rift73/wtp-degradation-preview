@@ -1,0 +1,48 @@
+Baseline before the performance pass (2026-10-09, scratch_profile.py, median ms of 3 after warm-up; first = warm-up call)
+all-24-defaults chain: 1024x1024 ~ 326 ms, 2048x2048 ~ 1334 ms
+
+2048x2048 RGB float32
+step                                ms     first
+noise:simplex                   1857.0      2095
+noise:perlin                     488.2       488
+hf_noise:denoise                 443.5       537   (8530 ms first call in a fresh process = CUDA JIT compile)
+dithering:riemersma              265.0       259
+hf_noise                         246.8       261
+noise                            203.8       200
+compress:webp                    174.5       173
+compress:h264                    104.7       107
+dithering                         94.9        94
+sin                               75.2        74
+halo:unsharp_halo                 74.7        80
+compress                          57.6        57
+ntsc                              55.5      1104
+blur:median                       52.8        56
+screentone                        48.7        49
+saturation                        39.1        37
+halo                              37.9        41
+canny                             37.2        38
+lowpass                           36.1       183
+filmgrain                         35.7        36
+rainbow                           34.6        38
+ghosting                          34.2        33
+resize                            33.9        34
+subsampling                       33.7        33
+interlace                         33.3        35
+overshoot                         33.3        37
+shift                             32.6        34
+scanline                          32.6        33
+banding                           32.6        33
+ui:numpy_to_qpixmap               28.0         0
+ui:PIL bicubic fit->1000px        26.7         0
+dithering:order                   25.8        26
+color                             24.2        25
+blur                              22.8        24
+blur:lens                         21.2        23
+blur:motion                       21.0        23
+pixelate                          18.0        19
+engine:source.copy x2             11.7         0
+
+1024x1024 RGB float32 (top rows)
+noise:simplex 447.1 | hf_noise:denoise 129.1 | noise:perlin 120.7 | dithering:riemersma 64.6 | hf_noise 57.8 | noise 46.7
+compress:webp 44.0 | compress:h264 43.2 | dithering 24.5 | halo:unsharp_halo 20.8 | sin 17.9 | blur:median 15.9
+GPU steps ~8.5 each | CPU steps 4-10 | ui:PIL bicubic 12.5 | ui:numpy_to_qpixmap 8.4

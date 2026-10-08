@@ -1,0 +1,82 @@
+﻿
+=== 1024x1024 RGB float32 === (median ms of 3 after warm-up; first = warm-up call)   all-24-defaults chain ~ 202 ms
+step                                ms     first
+dithering:riemersma               64.0        68
+compress:h264                     45.0        55
+compress:webp                     44.4       105
+dithering                         21.1        21
+halo:unsharp_halo                 18.6        18
+sin                               18.1        21
+compress                          14.6        15
+noise:simplex                     14.0        15
+screentone                        13.6        14
+blur:median                       13.1        13
+hf_noise:denoise                  10.6        15
+canny                             10.1        12
+halo                              10.0        10
+noise:perlin                       9.5        42
+ntsc                               8.8       129
+saturation                         8.7         8
+subsampling                        8.4        71
+ui:PIL bicubic fit->1000px         8.4         0
+resize                             8.3        10
+shift                              8.1         8
+noise                              8.0        10
+color                              7.4        12
+hf_noise                           6.3        67
+blur                               6.0        13
+dithering:order                    5.7         6
+rainbow                            5.4        10
+lowpass                            5.4       153
+filmgrain                          5.3        50
+blur:motion                        5.2         5
+blur:lens                          5.0         5
+overshoot                          5.0         6
+ghosting                           4.7         5
+interlace                          4.6         5
+banding                            4.6         5
+scanline                           4.6         5
+pixelate                           4.3         5
+ui:numpy_to_qpixmap                4.0         0
+engine:source.copy x2              2.9         0
+
+=== 2048x2048 RGB float32 === (median ms of 3 after warm-up; first = warm-up call)   all-24-defaults chain ~ 793 ms
+step                                ms     first
+dithering:riemersma              256.8       261
+compress:webp                    172.3       170
+compress:h264                    119.5       106
+dithering                         95.5        93
+halo:unsharp_halo                 74.2        78
+sin                               70.5        69
+compress                          57.6        58
+blur:median                       50.7        51
+screentone                        48.0        57
+noise:simplex                     44.5        56
+ntsc                              41.4       295
+hf_noise:denoise                  38.6        41
+resize                            36.2        36
+canny                             36.1        36
+halo                              36.0        41
+saturation                        35.4        35
+subsampling                       33.2        33
+shift                             32.9        32
+noise:perlin                      29.9        32
+noise                             29.0        29
+color                             26.5        35
+ui:PIL bicubic fit->1000px        22.3         0
+rainbow                           21.5        23
+blur                              21.0        23
+blur:lens                         20.8        21
+blur:motion                       20.7        21
+interlace                         19.8        31
+filmgrain                         19.8        21
+dithering:order                   19.5        21
+hf_noise                          19.5        21
+pixelate                          19.4        19
+overshoot                         19.3        19
+lowpass                           19.1        26
+ghosting                          18.7        18
+ui:numpy_to_qpixmap               18.5         0
+banding                           18.3        18
+scanline                          18.2        18
+engine:source.copy x2             12.1         0
