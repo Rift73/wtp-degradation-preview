@@ -3,6 +3,7 @@ import torch
 import torch.nn.functional as F
 from .utils import probability
 from ..utils.registry import register_class
+from optimized.gpu_degradations import image_to_tensor, tensor_to_image
 import logging
 
 try:
@@ -23,14 +24,10 @@ def _nlmeans_gpu(
 ) -> np.ndarray:
     """GPU Non-Local Means denoising with CUDA kernel fallback."""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    x = image_to_tensor(img, device)
 
-    # [H, W, C] -> [1, C, H, W]
-    if img.ndim == 2:
-        x = torch.from_numpy(img[None, None]).to(device=device, dtype=torch.float32)
-    else:
-        x = torch.from_numpy(img.transpose(2, 0, 1)[None]).to(device=device, dtype=torch.float32)
-
-    if _HAS_CUDA_NLMEANS and x.is_cuda and nlmeans_denoise_cuda is not None:
+    # The CUDA kernel handles three channels only
+    if _HAS_CUDA_NLMEANS and x.is_cuda and x.shape[1] == 3 and nlmeans_denoise_cuda is not None:
         global _NLMEANS_FALLBACK_LOGGED
         try:
             result = nlmeans_denoise_cuda(x, h, template_size, search_size)
@@ -45,11 +42,7 @@ def _nlmeans_gpu(
     else:
         result = _nlmeans_core(x, h, template_size, search_size)
 
-    # Back to numpy [H, W, C]
-    result_np = result.squeeze(0).cpu().numpy()
-    if img.ndim == 2:
-        return result_np.squeeze(0).astype(np.float32)
-    return result_np.transpose(1, 2, 0).astype(np.float32)
+    return tensor_to_image(result, img.ndim)
 
 
 @torch.no_grad()
@@ -100,6 +93,67 @@ def _nlmeans_core(
     return output / weights_sum
 
 
+def _beta_noise_gpu(
+    hq: np.ndarray, a: float, b: float, alpha: float, noise_channels: int, normalize: bool,
+) -> np.ndarray:
+    """Add Beta noise to HQ on the GPU.
+
+    The CUDA RNG is seeded from numpy's stream, so the engine's per-step seed
+    reproduces the noise on the same GPU; the global CUDA RNG state is restored
+    afterwards. torch.distributions takes no generator, hence fork_rng.
+    """
+    tensor = image_to_tensor(hq)
+    seed = int(np.random.randint(0, 2**31 - 1))
+    with torch.random.fork_rng(devices=[tensor.device]):
+        torch.cuda.manual_seed(seed)
+        params = torch.tensor([a, b], dtype=torch.float32, device=tensor.device)
+        noise = torch.distributions.Beta(params[0], params[1]).sample(
+            (1, noise_channels, *tensor.shape[2:])
+        )
+
+    if normalize:
+        noise = noise - noise.mean()
+        std = noise.std(correction=0)
+        if std > 1e-6:
+            noise = noise / std
+        noise = noise.clamp(-3, 3) * float(alpha)
+    else:
+        noise = (noise - 0.5) * 2 * float(alpha)
+
+    # Grayscale noise (one channel) broadcasts over the colour channels
+    return tensor_to_image(tensor + noise, hq.ndim)
+
+
+def _beta_noise_numpy(
+    hq: np.ndarray, a: float, b: float, alpha: float, noise_channels: int, normalize: bool,
+) -> np.ndarray:
+    """CPU path of _beta_noise_gpu."""
+    h, w = hq.shape[:2]
+    channels = hq.shape[2] if hq.ndim == 3 else 1
+
+    # Generate noise from Beta distribution
+    noise = np.random.beta(a, b, size=(h, w, noise_channels)).astype(np.float32)
+
+    if normalize:
+        noise = noise - noise.mean()
+        std = noise.std()
+        if std > 1e-6:
+            noise = noise / std
+        noise = np.clip(noise, -3, 3)
+        noise = noise * alpha
+    else:
+        noise = (noise - 0.5) * 2 * alpha
+
+    # Broadcast grayscale noise to all channels
+    if noise_channels < channels:
+        noise = np.broadcast_to(noise, (h, w, channels))
+
+    if hq.ndim == 2:
+        noise = noise.squeeze(-1)
+
+    return np.clip(hq + noise, 0, 1).astype(np.float32)
+
+
 @register_class("hf_noise")
 class HFNoise:
     """Adds beta-distributed high-frequency noise to HQ, optionally denoises LQ.
@@ -139,7 +193,6 @@ class HFNoise:
         if self.denoise:
             lq = _nlmeans_gpu(lq, h=self.denoise_strength)
 
-        h, w = hq.shape[:2]
         channels = hq.shape[2] if hq.ndim == 3 else 1
         is_gray_noise = np.random.uniform() < self.gray_prob
         noise_channels = 1 if is_gray_noise else channels
@@ -153,27 +206,10 @@ class HFNoise:
 
         alpha = np.random.uniform(*self.alpha_range)
 
-        # Generate noise from Beta distribution
-        noise = np.random.beta(a, b, size=(h, w, noise_channels)).astype(np.float32)
-
-        if self.normalize:
-            noise = noise - noise.mean()
-            std = noise.std()
-            if std > 1e-6:
-                noise = noise / std
-            noise = np.clip(noise, -3, 3)
-            noise = noise * alpha
+        if torch.cuda.is_available():
+            hq = _beta_noise_gpu(hq, a, b, alpha, noise_channels, self.normalize)
         else:
-            noise = (noise - 0.5) * 2 * alpha
-
-        # Broadcast grayscale noise to all channels
-        if is_gray_noise and channels > 1:
-            noise = np.broadcast_to(noise, (h, w, channels))
-
-        if hq.ndim == 2:
-            noise = noise.squeeze(-1)
-
-        hq = np.clip(hq + noise, 0, 1).astype(np.float32)
+            hq = _beta_noise_numpy(hq, a, b, alpha, noise_channels, self.normalize)
 
         logging.debug(
             "HF Noise - alpha: %.4f beta_a: %.2f beta_b: %.2f gray: %s normalize: %s denoise: %s strength: %.1f",

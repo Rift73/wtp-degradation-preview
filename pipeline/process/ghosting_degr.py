@@ -5,7 +5,9 @@ import logging
 
 try:
     import torch
-    from optimized.gpu_degradations import temporal_ghosting_pt
+    from optimized.gpu_degradations import (
+        temporal_ghosting_pt, image_to_tensor, tensor_to_image,
+    )
 
     _HAS_GPU = True
 except ImportError:
@@ -48,7 +50,5 @@ class Ghosting:
             f"Ghosting - shift: ({sx}, {sy}) opacity: {opacity:.2f}"
         )
 
-        tensor = torch.from_numpy(lq.transpose(2, 0, 1)[None]).cuda()
-        result = temporal_ghosting_pt(tensor, sx, sy, opacity)
-        lq = result.squeeze(0).cpu().numpy().transpose(1, 2, 0)
-        return np.clip(lq, 0, 1).astype(np.float32), hq
+        result = temporal_ghosting_pt(image_to_tensor(lq), sx, sy, opacity)
+        return tensor_to_image(result, lq.ndim), hq

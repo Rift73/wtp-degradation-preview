@@ -5,7 +5,7 @@ import logging
 
 try:
     import torch
-    from optimized.gpu_degradations import scanline_pt
+    from optimized.gpu_degradations import scanline_pt, image_to_tensor, tensor_to_image
 
     _HAS_GPU = True
 except ImportError:
@@ -42,16 +42,5 @@ class Scanline:
             f"Scanline - strength: {strength:.2f} even: {self.even_lines}"
         )
 
-        if lq.ndim == 2:
-            tensor = torch.from_numpy(lq[None, None]).cuda()
-        else:
-            tensor = torch.from_numpy(lq.transpose(2, 0, 1)[None]).cuda()
-
-        result = scanline_pt(tensor, strength, self.even_lines)
-
-        out = result.squeeze(0).cpu().numpy()
-        if lq.ndim == 2:
-            lq = out.squeeze(0).astype(np.float32)
-        else:
-            lq = out.transpose(1, 2, 0).astype(np.float32)
-        return np.clip(lq, 0, 1), hq
+        result = scanline_pt(image_to_tensor(lq), strength, self.even_lines)
+        return tensor_to_image(result, lq.ndim), hq

@@ -5,7 +5,9 @@ import logging
 
 try:
     import torch
-    from optimized.gpu_degradations import composite_rainbow_pt
+    from optimized.gpu_degradations import (
+        composite_rainbow_pt, image_to_tensor, tensor_to_image,
+    )
 
     _HAS_GPU_RAINBOW = True
 except ImportError:
@@ -56,10 +58,8 @@ class Rainbow:
             f"intensity: {intensity:.2f} phase: {phase_offset:.2f}"
         )
 
-        tensor = torch.from_numpy(lq.transpose(2, 0, 1)[None]).cuda()
         result = composite_rainbow_pt(
-            tensor, freq, bw, intensity,
+            image_to_tensor(lq), freq, bw, intensity,
             self.phase_alternation, phase_offset,
         )
-        lq = result.squeeze(0).cpu().numpy().transpose(1, 2, 0)
-        return np.clip(lq, 0, 1).astype(np.float32), hq
+        return tensor_to_image(result, lq.ndim), hq

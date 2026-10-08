@@ -5,7 +5,7 @@ import logging
 
 try:
     import torch
-    from optimized.gpu_degradations import film_grain_pt
+    from optimized.gpu_degradations import film_grain_pt, image_to_tensor, tensor_to_image
 
     _HAS_GPU = True
 except ImportError:
@@ -49,16 +49,9 @@ class FilmGrain:
 
         # film_grain_pt reads luma from channels 0-2, so grayscale goes in as
         # three equal channels (luma == gray) and channel 0 comes back out.
+        tensor = image_to_tensor(lq)
         if lq.ndim == 2:
-            tensor = torch.from_numpy(lq[None, None]).cuda().repeat(1, 3, 1, 1)
-        else:
-            tensor = torch.from_numpy(lq.transpose(2, 0, 1)[None]).cuda()
+            tensor = tensor.repeat(1, 3, 1, 1)
 
         result = film_grain_pt(tensor, intensity, grain_size, midtone)
-
-        out = result.squeeze(0).cpu().numpy()
-        if lq.ndim == 2:
-            lq = out[0].astype(np.float32)
-        else:
-            lq = out.transpose(1, 2, 0).astype(np.float32)
-        return np.clip(lq, 0, 1), hq
+        return tensor_to_image(result, lq.ndim), hq

@@ -15,7 +15,9 @@ import logging
 
 try:
     import torch
-    from optimized.gpu_degradations import quantize_pt, ordered_dither_pt
+    from optimized.gpu_degradations import (
+        quantize_pt, ordered_dither_pt, image_to_tensor, tensor_to_image,
+    )
     _HAS_GPU_DITHER = True
 except ImportError:
     _HAS_GPU_DITHER = False
@@ -114,23 +116,14 @@ class Dithering:
 
         # GPU path for quantize and ordered dither
         if _HAS_GPU_DITHER and torch.cuda.is_available() and self.dithering_type in _GPU_DITHER_TYPES:
-            if lq.ndim == 2:
-                tensor = torch.from_numpy(lq[None, None]).cuda()
-            else:
-                tensor = torch.from_numpy(lq.transpose(2, 0, 1)[None]).cuda()
-
+            tensor = image_to_tensor(lq)
             if self.dithering_type == "quantize":
                 result = quantize_pt(tensor, self.unif_quantiz)
             else:  # "order"
                 map_sz = random.choice(self.map_size) if isinstance(self.map_size, list) else self.map_size
                 result = ordered_dither_pt(tensor, self.unif_quantiz, int(map_sz))
 
-            out = result.squeeze(0).cpu().numpy()
-            if lq.ndim == 2:
-                lq = out.squeeze(0).astype(np.float32)
-            else:
-                lq = out.transpose(1, 2, 0).astype(np.float32)
-            return np.squeeze(lq), hq
+            return np.squeeze(tensor_to_image(result, lq.ndim)), hq
 
         # CPU fallback (exact error diffusion, riemersma)
         lq = DITHERING_TYPE_MAP[self.dithering_type](lq, UQ(self.unif_quantiz))

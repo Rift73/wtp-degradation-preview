@@ -4,6 +4,7 @@ Drop-in replacements for apply_per_image-wrapped CPU operations.
 All functions take/return BCHW float32 tensors on GPU.
 
 Functions:
+- image_to_tensor / tensor_to_image: numpy HWC image <-> 1CHW tensor hand-off
 - rgb_to_ycbcr_pt / ycbcr_to_rgb_pt: Color space conversion (BT.601/709/2020/240M)
 - rgb_to_cmyk_pt / cmyk_to_rgb_pt: CMYK conversion
 - channel_shift_pt: Per-channel spatial shift (RGB/YUV/CMYK)
@@ -25,6 +26,7 @@ Functions:
 from __future__ import annotations
 
 import logging
+import numpy as np
 import torch
 from torch import Tensor
 from torch.nn import functional as F
@@ -37,6 +39,33 @@ try:
 except ImportError:
     iir_trailing_cuda = None  # type: ignore[assignment]
     _HAS_IIR_CUDA = False
+
+
+# ═══════════════════════════════════════════════════════════════
+# numpy Hand-off
+# ═══════════════════════════════════════════════════════════════
+
+
+def image_to_tensor(img: np.ndarray, device: torch.device | str = "cuda") -> Tensor:
+    """Upload an HWC (or HW) float32 image as a 1CHW tensor in one copy.
+
+    The tensor is a channels-last view of the uploaded HWC block. The kernels
+    always received this layout, and cuFFT/cuBLAS round differently on a
+    planar copy, so it stays a view.
+    """
+    tensor = torch.from_numpy(np.ascontiguousarray(img, dtype=np.float32)).to(device)
+    if tensor.ndim == 2:
+        return tensor[None, None]
+    return tensor.permute(2, 0, 1).unsqueeze(0)
+
+
+def tensor_to_image(tensor: Tensor, ndim: int) -> np.ndarray:
+    """Clamp a 1CHW tensor to [0, 1] and download it once as a float32 image.
+
+    Returns HWC, or HW (channel 0) when ``ndim`` is 2.
+    """
+    tensor = tensor[0, 0] if ndim == 2 else tensor[0].permute(1, 2, 0)
+    return tensor.clamp(0, 1).contiguous().cpu().numpy()
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1198,8 +1227,10 @@ def _build_upscale_matrix(src_size: int, dst_size: int, device: torch.device) ->
 
     Each row j contains the weights that map src pixels to output pixel j.
     Matches the coordinate convention of F.interpolate(align_corners=False).
+    Filled on the host (per-element device writes cost a launch each) and
+    uploaded once.
     """
-    A = torch.zeros(dst_size, src_size, device=device, dtype=torch.float64)
+    A = np.zeros((dst_size, src_size), dtype=np.float64)
     for j in range(dst_size):
         # Source coordinate for output pixel j (half-pixel centered)
         center = (j + 0.5) * src_size / dst_size - 0.5
@@ -1216,7 +1247,7 @@ def _build_upscale_matrix(src_size: int, dst_size: int, device: torch.device) ->
         # Normalize
         if row_sum > 0:
             A[j] /= row_sum
-    return A
+    return torch.from_numpy(A).to(device)
 
 
 def _build_descale_matrix(src_size: int, dst_size: int, device: torch.device) -> Tensor:

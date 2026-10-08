@@ -5,7 +5,7 @@ import logging
 
 try:
     import torch
-    from optimized.gpu_degradations import interlace_pt
+    from optimized.gpu_degradations import interlace_pt, image_to_tensor, tensor_to_image
 
     _HAS_GPU = True
 except ImportError:
@@ -43,7 +43,5 @@ class Interlace:
 
         logging.debug(f"Interlace - shift: {shift} field: {field}")
 
-        tensor = torch.from_numpy(lq.transpose(2, 0, 1)[None]).cuda()
-        result = interlace_pt(tensor, shift, field)
-        lq = result.squeeze(0).cpu().numpy().transpose(1, 2, 0)
-        return np.clip(lq, 0, 1).astype(np.float32), hq
+        result = interlace_pt(image_to_tensor(lq), shift, field)
+        return tensor_to_image(result, lq.ndim), hq

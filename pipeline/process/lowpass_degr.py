@@ -5,7 +5,9 @@ import logging
 
 try:
     import torch
-    from optimized.gpu_degradations import lowpass_filter_pt, detail_mask_neo_pt
+    from optimized.gpu_degradations import (
+        lowpass_filter_pt, detail_mask_neo_pt, image_to_tensor, tensor_to_image,
+    )
 
     _HAS_GPU_LOWPASS = True
 except ImportError:
@@ -49,43 +51,24 @@ class Lowpass:
 
         logging.debug(f"Lowpass - cutoff: {cutoff:.3f} order: {order}")
 
-        # Keep original for detail mask blending
-        original_lq = lq.copy() if self.detail_mask else None
-
-        if lq.ndim == 2:
-            tensor = torch.from_numpy(lq[None, None]).cuda()
-        else:
-            tensor = torch.from_numpy(lq.transpose(2, 0, 1)[None]).cuda()
-
-        result = lowpass_filter_pt(tensor, cutoff, order)
-
-        out = result.squeeze(0).cpu().numpy()
-        if lq.ndim == 2:
-            filtered = out.squeeze(0).astype(np.float32)
-        else:
-            filtered = out.transpose(1, 2, 0).astype(np.float32)
-        filtered = np.clip(filtered, 0, 1)
+        tensor = image_to_tensor(lq)
+        filtered = lowpass_filter_pt(tensor, cutoff, order)
 
         # Detail mask: protect edges/detail, only lowpass flat areas
-        if self.detail_mask and original_lq is not None:
+        if self.detail_mask:
             # Compute mask from HQ using PyTorch detail_mask_neo
+            hq_tensor = image_to_tensor(hq)
             if hq.ndim == 2:
-                hq_tensor = torch.from_numpy(np.repeat(hq[None, None], 3, axis=1)).cuda()
-            else:
-                hq_tensor = torch.from_numpy(hq.transpose(2, 0, 1)[None]).cuda()
+                hq_tensor = hq_tensor.repeat(1, 3, 1, 1)
 
-            mask_tensor = detail_mask_neo_pt(
+            mask = detail_mask_neo_pt(
                 hq_tensor, lines_brz=self.mask_lines_brz,
             )  # (1, 1, H, W)
-
-            mask = mask_tensor.squeeze(0).squeeze(0).cpu().numpy()  # (H, W)
-            if original_lq.ndim == 3:
-                mask = mask[:, :, None]
-            filtered = mask * original_lq + (1.0 - mask) * filtered
+            filtered = mask * tensor + (1.0 - mask) * filtered
 
             logging.debug(
                 "Lowpass detail mask - coverage: %.1f%%",
-                float(np.mean(mask > 0)) * 100,
+                float((mask > 0).float().mean()) * 100,
             )
 
-        return filtered, hq
+        return tensor_to_image(filtered, lq.ndim), hq

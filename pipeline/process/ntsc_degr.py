@@ -5,7 +5,9 @@ import logging
 
 try:
     import torch
-    from optimized.gpu_degradations import ntsc_composite_pt
+    from optimized.gpu_degradations import (
+        ntsc_composite_pt, image_to_tensor, tensor_to_image,
+    )
 
     _HAS_GPU_NTSC = True
 except ImportError:
@@ -95,9 +97,8 @@ class NTSCComposite:
             ringing_val, vlbw_val, trail_val,
         )
 
-        tensor = torch.from_numpy(lq.transpose(2, 0, 1)[None]).cuda()
         result = ntsc_composite_pt(
-            tensor,
+            image_to_tensor(lq),
             noise=noise_val,
             luma_noise=luma_noise_val,
             ghost_amplitude=ghost_amp,
@@ -112,5 +113,4 @@ class NTSCComposite:
             comb_mode=self.comb_mode,
             enable_vhs=self.enable_vhs,
         )
-        lq = result.squeeze(0).cpu().numpy().transpose(1, 2, 0)
-        return np.clip(lq, 0, 1).astype(np.float32), hq
+        return tensor_to_image(result, lq.ndim), hq

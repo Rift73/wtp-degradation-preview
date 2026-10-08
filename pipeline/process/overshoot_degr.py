@@ -5,7 +5,7 @@ import logging
 
 try:
     import torch
-    from optimized.gpu_degradations import overshoot_pt
+    from optimized.gpu_degradations import overshoot_pt, image_to_tensor, tensor_to_image
 
     _HAS_GPU = True
 except ImportError:
@@ -46,16 +46,5 @@ class Overshoot:
             f"Overshoot - amount: {amount:.2f} cutoff: {cutoff:.2f} order: {order}"
         )
 
-        if lq.ndim == 2:
-            tensor = torch.from_numpy(lq[None, None]).cuda()
-        else:
-            tensor = torch.from_numpy(lq.transpose(2, 0, 1)[None]).cuda()
-
-        result = overshoot_pt(tensor, amount, cutoff, order)
-
-        out = result.squeeze(0).cpu().numpy()
-        if lq.ndim == 2:
-            lq = out.squeeze(0).astype(np.float32)
-        else:
-            lq = out.transpose(1, 2, 0).astype(np.float32)
-        return np.clip(lq, 0, 1), hq
+        result = overshoot_pt(image_to_tensor(lq), amount, cutoff, order)
+        return tensor_to_image(result, lq.ndim), hq
