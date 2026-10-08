@@ -189,3 +189,15 @@ process start-up per run, so for small images PyAV is faster (H.264 at 64²: 84 
 and 2048² decides whether that evens out. GPU-resident hand-off: consecutive GPU steps run as a group (one upload,
 one download, bit-identical); cache entries inside a group are GPU tensors (G3) so a slider edit on a late GPU
 step re-runs only that step.
+
+Measured (lane G2 bench, median of 20): system ffmpeg vs PyAV per codec, 4:2:0, ms:
+
+| size | h264 | hevc | mpeg2 | mpeg4 | vp9 |
+|---|---|---|---|---|---|
+| 1024² | 114 vs 58 | 161 vs 133 | 105 vs 35 | 112 vs 37 | 226 vs 155 |
+| 2048² | 211 vs 131 | 266 vs 202 | 177 vs 90 | 189 vs 103 | 379 vs 308 |
+
+Two process spawns and the pipe cost ~70 ms per run, so PyAV is the default backend and the system ffmpeg is a
+one-click option in the chip (persisted). GPU hand-off: the nine GPU steps alone 56.6 → 26.3 ms at 1024² and
+180 → 74 ms at 2048² (bit-identical); the mixed 24-step default chain is unchanged within noise (its CPU steps
+dominate and it has few consecutive GPU runs); a warm edit of a late step costs 5.5 ms at 1024², 17.6 ms at 2048².

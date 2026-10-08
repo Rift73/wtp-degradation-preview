@@ -67,14 +67,14 @@ run.bat
 
 Open an image with **Open image** (Ctrl+O), add steps with **Add step**, and adjust the sliders. Window geometry, splitter position, last folder, FFmpeg path, video backend and the current pipeline are remembered in `config.json`.
 
-The video codecs of the compress step (H.264, HEVC, MPEG-2, MPEG-4, VP9) run on the first backend that works: the ffmpeg executable you picked with **Locate ffmpeg…**, then the `ffmpeg` on PATH, then PyAV's bundled FFmpeg (installed with the requirements; runs in-process). The header chip shows which one is in use, for example `Video: ffmpeg 8.1 (system)` or `Video: built-in (PyAV)`, and its menu locates an ffmpeg or switches between the two; choosing the built-in one tries PyAV first. A codec whose encoder the system ffmpeg lacks runs on PyAV. FFmpeg builds convert RGB to 4:2:0 slightly differently, so the two backends can differ along sharp colour edges (about one level in 255 on average).
+The video codecs of the compress step (H.264, HEVC, MPEG-2, MPEG-4, VP9) run on PyAV's bundled FFmpeg by default (installed with the requirements; runs in-process and is 1.3-2x faster than piping through an ffmpeg executable). Choose **Use system ffmpeg** or **Locate ffmpeg…** in the chip to run them on your own ffmpeg instead (the one you picked, else the `ffmpeg` on PATH); the choice is remembered. The header chip shows which one is in use, for example `Video: ffmpeg 8.1 (system)` or `Video: built-in (PyAV)`, and its menu locates an ffmpeg or switches between the two; choosing the built-in one tries PyAV first. A codec whose encoder the system ffmpeg lacks runs on PyAV. FFmpeg builds convert RGB to 4:2:0 slightly differently, so the two backends can differ along sharp colour edges (about one level in 255 on average).
 
 ## Project Structure
 
 ```
 main.pyw            # Application entry point (header, shortcuts, config.json)
 engine.py           # Background pipeline runner, seeding, per-step timing and errors
-video_backend.py    # Video codec backend: located ffmpeg, then ffmpeg on PATH, then PyAV
+video_backend.py    # Video codec backend: PyAV by default; the located ffmpeg or the one on PATH on request
 widgets.py          # Pipeline panel, step cards, parameter editors
 comparison.py       # Preview: Wipe / Side-by-side / A/B views, zoom and pan
 presets.py          # Preset JSON save/load and HCL export

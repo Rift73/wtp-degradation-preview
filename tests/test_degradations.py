@@ -705,7 +705,11 @@ def test_video_backend_detect():
     try:
         backend = video_backend.restore_ffmpeg({})
         system = shutil.which("ffmpeg")
+        # PyAV is the default (in-process, 1.3-2x faster than piping ffmpeg)
+        if HAS_AV:
+            assert backend.kind == "pyav", backend
         if system is not None:
+            backend = video_backend.restore_ffmpeg({"video_backend": "ffmpeg"})
             assert backend.kind == "ffmpeg" and os.path.samefile(backend.path, system), backend
             assert backend.version and "mpeg4" in backend.encoders, backend
             assert video_backend.detect() is backend, "detect() must be cached"

@@ -33,7 +33,7 @@ class Backend:
 
 
 _lock = threading.Lock()
-_preference = "ffmpeg"   # the kind tried first
+_preference = "pyav"     # the kind tried first; PyAV is in-process and 1.3-2x faster than piping ffmpeg
 _configured = None       # the executable the user located, or None
 _backend = None          # detect() cache
 _probes = {}             # executable -> (version, encoders), or None when it is not a working ffmpeg
@@ -141,10 +141,10 @@ def restore_ffmpeg(cfg):
     """Apply cfg's "ffmpeg_path" and "video_backend"; returns detect()."""
     global _configured, _preference, _backend
     path = cfg.get("ffmpeg_path", "")
-    kind = cfg.get("video_backend", "ffmpeg")
+    kind = cfg.get("video_backend", "pyav")
     with _lock:
         _configured = path if path and os.path.isfile(path) else None
-        _preference = kind if kind in KINDS else "ffmpeg"
+        _preference = kind if kind in KINDS else "pyav"
         _backend = None
     return detect()
 
