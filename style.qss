@@ -5,8 +5,9 @@
      border #2A3039  text #E6E8EB      muted #8B93A1    accent #5B9DF5
      danger #E05555  warn #D4A843      ok #4CAF6A       radius 6
    Dynamic properties the code sets (re-polish the widget after changing):
-     #stepCard[state]   "ok" | "error" | "disabled"
-     #statusDot[level]  "idle" | "ok" | "error"
+     #stepCard[state]          "ok" | "error" | "disabled"
+     #statusDot[level]         "idle" | "ok" | "error"
+     #videoBackendChip[state]  "ffmpeg" | "pyav" | "none"
    ═══════════════════════════════════════════════════════════════════ */
 
 /* ── Base ── */
@@ -236,14 +237,39 @@ QPushButton#accentButton:pressed {
     border-color: #4A88D9;
 }
 
-/* FFmpeg locator, shown in the header only while FFmpeg is missing */
-QPushButton#ffmpegBtn {
+/* Video backend chip in the header (menu: locate ffmpeg, pick the backend);
+   styled like #toolBtn, amber while no backend is available */
+QToolButton#videoBackendChip {
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    padding: 3px 8px;
+    min-height: 22px;
+    color: #E6E8EB;
+    font-weight: 400;
+}
+
+QToolButton#videoBackendChip:hover {
+    background-color: #222833;
+    border-color: #2A3039;
+}
+
+QToolButton#videoBackendChip:pressed {
+    background-color: #2A3039;
+}
+
+QToolButton#videoBackendChip::menu-indicator {
+    image: none;
+    width: 0;
+}
+
+QToolButton#videoBackendChip[state="none"] {
     background-color: #2A2413;
-    border: 1px solid #6B5A24;
+    border-color: #6B5A24;
     color: #D4A843;
 }
 
-QPushButton#ffmpegBtn:hover {
+QToolButton#videoBackendChip[state="none"]:hover {
     background-color: #382F18;
     border-color: #D4A843;
 }

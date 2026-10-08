@@ -26,7 +26,7 @@ A PySide6 GUI for real-time preview of the `wtp_dataset_destroyer` degradation p
 - **Seed and Re-roll** -- a session seed makes edits repeatable; Re-roll draws a new seed for fresh noise
 - **Zoom and pan** -- Fit, 100%, zoom in/out, Ctrl+wheel, drag to pan, double-click to fit
 - **Optional CUDA** acceleration for IIR trailing and NLMeans, with JIT compilation
-- **FFmpeg auto-detection** with a manual "Locate FFmpeg" fallback in the header
+- **Video codecs on your FFmpeg** -- a header chip shows the video backend in use and switches it (see below)
 
 ## Keyboard shortcuts
 
@@ -46,7 +46,7 @@ A PySide6 GUI for real-time preview of the `wtp_dataset_destroyer` degradation p
 
 - Python 3.14 (64-bit, Windows)
 - Windows (bat scripts included; the Python code itself is cross-platform)
-- FFmpeg (optional, for video-based degradations; must use shared build)
+- FFmpeg (optional; any static or shared build with libx264, libx265 and libvpx; PyAV's bundled FFmpeg is the fallback)
 - CUDA + Visual Studio Build Tools (optional, for GPU-accelerated degradations)
 
 `chainner_ext` is vendored under `vendor/chainner_ext/` as a prebuilt C module from the author's chaiNNer-C project, so it is not installed from PyPI.
@@ -65,13 +65,16 @@ This creates a virtual environment with the `py -3.14` launcher and installs all
 run.bat
 ```
 
-Open an image with **Open image** (Ctrl+O), add steps with **Add step**, and adjust the sliders. Window geometry, splitter position, last folder, FFmpeg path and the current pipeline are remembered in `config.json`.
+Open an image with **Open image** (Ctrl+O), add steps with **Add step**, and adjust the sliders. Window geometry, splitter position, last folder, FFmpeg path, video backend and the current pipeline are remembered in `config.json`.
+
+The video codecs of the compress step (H.264, HEVC, MPEG-2, MPEG-4, VP9) run on the first backend that works: the ffmpeg executable you picked with **Locate ffmpeg…**, then the `ffmpeg` on PATH, then PyAV's bundled FFmpeg (installed with the requirements; runs in-process). The header chip shows which one is in use, for example `Video: ffmpeg 8.1 (system)` or `Video: built-in (PyAV)`, and its menu locates an ffmpeg or switches between the two; choosing the built-in one tries PyAV first. A codec whose encoder the system ffmpeg lacks runs on PyAV. FFmpeg builds convert RGB to 4:2:0 slightly differently, so the two backends can differ along sharp colour edges (about one level in 255 on average).
 
 ## Project Structure
 
 ```
 main.pyw            # Application entry point (header, shortcuts, config.json)
 engine.py           # Background pipeline runner, seeding, per-step timing and errors
+video_backend.py    # Video codec backend: located ffmpeg, then ffmpeg on PATH, then PyAV
 widgets.py          # Pipeline panel, step cards, parameter editors
 comparison.py       # Preview: Wipe / Side-by-side / A/B views, zoom and pan
 presets.py          # Preset JSON save/load and HCL export

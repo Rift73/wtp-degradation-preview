@@ -24,15 +24,15 @@ if _OWN_DIR not in sys.path:
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QSplitter, QPushButton, QLabel, QFileDialog, QStatusBar,
-    QFrame, QSpinBox, QMessageBox, QToolButton,
+    QFrame, QSpinBox, QMessageBox, QToolButton, QMenu,
 )
 from PySide6.QtCore import Qt, QTimer, QByteArray
-from PySide6.QtGui import QFont, QDragEnterEvent, QDropEvent, QShortcut, QKeySequence
-
-from engine import (
-    PipelineEngine, load_image, numpy_to_qpixmap,
-    ffmpeg_available, restore_ffmpeg, register_ffmpeg,
+from PySide6.QtGui import (
+    QFont, QDragEnterEvent, QDropEvent, QShortcut, QKeySequence, QActionGroup,
 )
+
+import video_backend
+from engine import PipelineEngine, load_image, numpy_to_qpixmap
 from widgets import PipelinePanel
 from comparison import ComparisonView
 
@@ -86,7 +86,7 @@ class MainWindow(QMainWindow):
         self._last_hq_pixmap = None
         self.last_dir = self.cfg.get("last_dir", "")
         self._last_error = ""
-        self._has_ffmpeg = restore_ffmpeg(self.cfg)
+        video_backend.restore_ffmpeg(self.cfg)
 
         self.engine = PipelineEngine(self)
         self.engine.result_ready.connect(self._on_result)
@@ -128,15 +128,24 @@ class MainWindow(QMainWindow):
         hl.addWidget(self.image_label)
         hl.addStretch()
 
-        self.ffmpeg_btn = QPushButton("Locate FFmpeg")
-        self.ffmpeg_btn.setObjectName("ffmpegBtn")
-        self.ffmpeg_btn.setToolTip(
-            "Video codecs (H264, HEVC, VP9, MPEG) need FFmpeg.\n"
-            "Click to select your ffmpeg.exe."
-        )
-        self.ffmpeg_btn.clicked.connect(self._locate_ffmpeg)
-        self.ffmpeg_btn.setVisible(not self._has_ffmpeg)
-        hl.addWidget(self.ffmpeg_btn)
+        self.video_chip = QToolButton()
+        self.video_chip.setObjectName("videoBackendChip")
+        self.video_chip.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        video_menu = QMenu(self.video_chip)
+        video_menu.addAction("Locate ffmpeg…", self._locate_ffmpeg)
+        video_menu.addSeparator()
+        backend_group = QActionGroup(video_menu)
+        self.use_system_action = video_menu.addAction(
+            "Use system ffmpeg", lambda: self._use_video_backend("ffmpeg"))
+        self.use_pyav_action = video_menu.addAction(
+            "Use built-in (PyAV)", lambda: self._use_video_backend("pyav"))
+        for action in (self.use_system_action, self.use_pyav_action):
+            action.setCheckable(True)
+            backend_group.addAction(action)
+        video_menu.aboutToShow.connect(self._sync_video_menu)
+        self.video_chip.setMenu(video_menu)
+        self._refresh_video_chip()
+        hl.addWidget(self.video_chip)
 
         seed_lbl = QLabel("Seed")
         seed_lbl.setObjectName("dimLabel")
@@ -238,22 +247,55 @@ class MainWindow(QMainWindow):
         _save_config(self.cfg)
         super().closeEvent(event)
 
-    # ── FFmpeg locator ──
+    # ── Video backend (header chip) ──
+
+    def _refresh_video_chip(self):
+        backend = video_backend.detect()
+        if backend.kind == "ffmpeg":
+            text = f"Video: ffmpeg {backend.version} (system)"
+            tip = f"Video codecs run through {backend.path}"
+        elif backend.kind == "pyav":
+            text = "Video: built-in (PyAV)"
+            tip = f"Video codecs run in-process through PyAV's FFmpeg {backend.version}"
+        else:
+            text = "Video: none"
+            tip = ("No ffmpeg found and PyAV is not installed: the H.264, HEVC, MPEG-2,\n"
+                   "MPEG-4 and VP9 codecs fail until you locate an ffmpeg executable")
+        self.video_chip.setText(text)
+        self.video_chip.setToolTip(f"{tip}\nClick to locate ffmpeg or switch the video backend.")
+        self.video_chip.setProperty("state", backend.kind)
+        self.video_chip.style().unpolish(self.video_chip)
+        self.video_chip.style().polish(self.video_chip)
+
+    def _sync_video_menu(self):
+        """Check the backend in use; disable a backend that is not available."""
+        kind = video_backend.detect().kind
+        self.use_system_action.setEnabled(video_backend.ffmpeg_available())
+        self.use_pyav_action.setEnabled(video_backend.pyav_available())
+        self.use_system_action.setChecked(kind == "ffmpeg")
+        self.use_pyav_action.setChecked(kind == "pyav")
+
+    def _video_backend_changed(self):
+        self._refresh_video_chip()
+        _save_config(self.cfg)
+        self._status(self.video_chip.text())
+        self._schedule_run()
+
+    def _use_video_backend(self, kind):
+        video_backend.set_preference(kind)
+        self.cfg["video_backend"] = kind
+        self._video_backend_changed()
 
     def _locate_ffmpeg(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, "Locate FFmpeg", "", "ffmpeg (ffmpeg.exe ffmpeg);;All (*)",
+            self, "Locate ffmpeg", "", "ffmpeg (ffmpeg.exe ffmpeg);;All (*)",
         )
         if not path:
             return
-        register_ffmpeg(path, self.cfg)
-        _save_config(self.cfg)
-        if ffmpeg_available():
-            self._has_ffmpeg = True
-            self.ffmpeg_btn.setVisible(False)
-            self._status(f"FFmpeg found: {path}")
+        if video_backend.register_ffmpeg(path, self.cfg):
+            self._video_backend_changed()
         else:
-            self._status("Selected file is not a valid ffmpeg executable")
+            self._status(f"Not a working ffmpeg executable: {path}")
 
     # ── Image loading ──
 
