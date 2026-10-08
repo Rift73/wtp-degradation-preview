@@ -5,6 +5,7 @@ Runs under pytest, or standalone (pytest is not required):
     venv\\Scripts\\python.exe tests\\test_degradations.py
 """
 
+import gc
 import importlib.util
 import logging
 import os
@@ -772,8 +773,10 @@ def _one_by_one(source, configs, seed):
     return lq, hq
 
 
-def _cached_depths(eng):
-    return sorted(entry.depth for entry in eng._thread.cache.entries.values())
+def _cached_depths(eng, tensors=False):
+    """Depths of the cached array entries, or with tensors of the tensor entries."""
+    return sorted(entry.depth for entry in eng._thread.cache.entries.values()
+                  if (entry.sources is not None) == tensors)
 
 
 def _gpu_chain():
@@ -789,18 +792,20 @@ def test_engine_gpu_group_matches_steps():
         return
     img = _image()
     cases = (
-        (img, _gpu_chain(), [0, 3, 4]),
+        (img, _gpu_chain(), [0, 3, 4], [1, 2]),
         # Beyond [0, 1], led by a step that leaves lq unchanged: the group must
-        # pass the unclamped upload on, as run() does
-        (img * 1.2 - 0.1, [_config("scanline", strength=0.0)] + _gpu_chain()[1:4], [3]),
+        # pass the unclamped upload on, as run() does. That upload stands for
+        # an array the cache holds no copy of, so step 0 is not cached
+        (img * 1.2 - 0.1, [_config("scanline", strength=0.0)] + _gpu_chain()[1:4], [3], [1, 2]),
     )
-    for source, configs, depths in cases:
+    for source, configs, depths, tensor_depths in cases:
         eng = engine.PipelineEngine()
         run = _run_once(eng, source, configs, 6)
         assert all(s.error is None for s in run.steps), run.steps
         lq, hq = _one_by_one(source, configs, 6)
         assert _same_bits(run.lq, lq) and _same_bits(run.hq, hq), configs
-        assert _cached_depths(eng) == depths, "a group is cached at its end only"
+        assert _cached_depths(eng) == depths, "arrays are cached at a group's end only"
+        assert _cached_depths(eng, tensors=True) == tensor_depths
         assert [s.index for s in run.steps] == list(range(len(configs)))
         assert all(s.elapsed_ms > 0 for s in run.steps), [s.elapsed_ms for s in run.steps]
         assert not run.hq_changed and run.hq_u8 is None
@@ -822,13 +827,13 @@ def test_engine_gpu_group_resume_matches_cold_run():
     cold = _run_once(engine.PipelineEngine(), img, head + tail, 9)
     assert (resumed.cached_steps, cold.cached_steps) == (2, 0)
     assert _same_bits(resumed.lq, cold.lq) and _same_bits(resumed.hq, cold.hq)
-    # An edit inside a group re-runs from the group's start
+    # An edit inside a group resumes from the tensors of the step before it
     eng = engine.PipelineEngine()
     _run_once(eng, img, head + tail, 9)
-    assert _cached_depths(eng) == [3]
+    assert _cached_depths(eng) == [3] and _cached_depths(eng, tensors=True) == [0, 1, 2]
     edited = head + [_config("scanline", strength=0.9), tail[1]]
     rerun = _run_once(eng, img, edited, 9)
-    assert rerun.cached_steps == 0
+    assert rerun.cached_steps == 2
     assert _same_bits(rerun.lq, _run_once(engine.PipelineEngine(), img, edited, 9).lq)
     # An edit after a group resumes at the group's end
     eng = engine.PipelineEngine()
@@ -838,6 +843,137 @@ def test_engine_gpu_group_resume_matches_cold_run():
     resumed = _run_once(eng, img, later, 9)
     assert resumed.cached_steps == 4
     assert _same_bits(resumed.lq, _one_by_one(img, later, 9)[0])
+
+
+def _two_groups():
+    # Three GPU steps (one group), a CPU step, three GPU steps (another group)
+    return [_config("overshoot"), _config("lowpass"), _config("filmgrain"), _config("saturation"),
+            _config("interlace"), _config("ghosting"), _config("scanline")]
+
+
+def _edit(configs, index, config):
+    return configs[:index] + [config] + configs[index + 1:]
+
+
+def _check_resume(eng, source, configs, seed, index, config):
+    """Run configs with step index replaced on eng, which ran configs before:
+    only that step and the later ones run, and the result equals a cold run's."""
+    edited = _edit(configs, index, config)
+    resumed = _run_once(eng, source, edited, seed)
+    cold = _run_once(engine.PipelineEngine(), source, edited, seed)
+    assert all(s.error is None for s in resumed.steps + cold.steps), edited
+    assert resumed.cached_steps == index and cold.cached_steps == 0, (index, resumed.cached_steps)
+    assert [s.cached for s in resumed.steps] == [i < index for i in range(len(edited))]
+    assert _same_bits(resumed.lq, cold.lq) and _same_bits(resumed.hq, cold.hq), (index, edited)
+    assert resumed.hq_changed == cold.hq_changed
+    return resumed
+
+
+def test_engine_gpu_group_last_step_edit():
+    if _torch_cuda() is None:
+        print("  SKIP: no CUDA device")
+        return
+    img = _image()
+    chain = _two_groups()
+    eng = engine.PipelineEngine()
+    first = _run_once(eng, img, chain, 7)
+    assert _cached_depths(eng) == [2, 3, 6] and _cached_depths(eng, tensors=True) == [0, 1, 4, 5]
+    # An edit of the second group's last step runs that step alone, on the device
+    scanline = _config("scanline", strength=0.6)
+    resumed = _check_resume(eng, img, chain, 7, 6, scanline)
+    assert resumed.cached_steps == len(chain) - 1
+    assert _same_bits(resumed.lq, _one_by_one(img, _edit(chain, 6, scanline), 7)[0])
+    assert not np.array_equal(first.lq, resumed.lq), "the edit had no effect"
+
+
+def test_engine_gpu_group_middle_step_edit():
+    if _torch_cuda() is None:
+        print("  SKIP: no CUDA device")
+        return
+    img = _image()
+    chain = _two_groups()
+    eng = engine.PipelineEngine()
+    _run_once(eng, img, chain, 7)
+    for index, config in ((1, _config("lowpass", cutoff=0.3)), (5, _config("ghosting", opacity=0.4))):
+        _check_resume(eng, img, chain, 7, index, config)
+    # Every GPU step type, edited (skipped) in the middle of one long group: a
+    # resume reads the tensors the original step got, so a step that wrote
+    # into its inputs would show here
+    chain = [_config(key) for key in GPU_STEPS]
+    eng = engine.PipelineEngine()
+    _run_once(eng, img, chain, 3)
+    assert _cached_depths(eng, tensors=True) == list(range(len(chain) - 1))
+    for index in range(1, len(chain)):
+        _check_resume(eng, img, chain, 3, index, dict(chain[index], probability=0.0))
+    # Steps that leave lq unchanged pass the group's input on as it is: here
+    # beyond [0, 1] (blur does not clip), and then one array as lq and hq,
+    # which halo writes into
+    skip = _config("scanline", strength=0.0)
+    other_skip = _config("scanline", strength=0.0, even_lines=False)
+    beyond = img * 1.2 - 0.1
+    cases = (
+        (beyond, [_config("blur"), skip, skip, _config("saturation")]),
+        (img, [dict(_config("noise"), lqhq=True), skip, skip,
+               _config("halo", type_halo="unsharp_gray", amount=2.0)]),
+    )
+    assert _one_by_one(beyond, cases[0][1][:1], 3)[0].max() > 1
+    for source, configs in cases:
+        eng = engine.PipelineEngine()
+        _run_once(eng, source, configs, 3)
+        assert _cached_depths(eng, tensors=True) == [1]
+        _check_resume(eng, source, configs, 3, 2, other_skip)
+    # A failed step inside a group is not cached, nor is any step after it
+    bad = dict(_config("scanline"), strength=["x", "y"])
+    eng = engine.PipelineEngine()
+    run = _run_once(eng, img, [_config("overshoot"), _config("lowpass"), bad, _config("filmgrain"),
+                               _config("banding")], 3)
+    assert [s.error is not None for s in run.steps] == [False, False, True, False, False]
+    assert _cached_depths(eng, tensors=True) == [0, 1] and _cached_depths(eng) == []
+
+
+def test_engine_gpu_group_tiny_device_budget():
+    if _torch_cuda() is None:
+        print("  SKIP: no CUDA device")
+        return
+    img = _image()
+    chain = _two_groups()
+    edited = _edit(chain, 6, _config("scanline", strength=0.6))
+    cold = _run_once(engine.PipelineEngine(), img, edited, 7)
+    limit = engine._DEVICE_CACHE_BYTES
+    try:
+        for budget in (1, 0):  # no tensor fits / no tensor cache
+            engine._DEVICE_CACHE_BYTES = budget
+            eng = engine.PipelineEngine()
+            _run_once(eng, img, chain, 7)
+            assert _cached_depths(eng) == [2, 3, 6] and _cached_depths(eng, tensors=True) == []
+            # Back to caching at group ends: the edit re-runs the whole group
+            resumed = _run_once(eng, img, edited, 7)
+            assert resumed.cached_steps == 4
+            assert _same_bits(resumed.lq, cold.lq) and _same_bits(resumed.hq, cold.hq)
+    finally:
+        engine._DEVICE_CACHE_BYTES = limit
+
+
+def test_engine_new_source_frees_device_cache():
+    torch = _torch_cuda()
+    if torch is None:
+        print("  SKIP: no CUDA device")
+        return
+    img = _image()
+    chain = _two_groups()
+    eng = engine.PipelineEngine()
+    # The first run also sets up the steps' own device state (filters, FFT plans)
+    _run_once(eng, img, chain, 7)
+    _run_once(eng, img.copy(), [_config("blur")], 7)
+    gc.collect()
+    baseline = torch.cuda.memory_allocated()
+    _run_once(eng, img, chain, 7)
+    assert _cached_depths(eng, tensors=True) and torch.cuda.memory_allocated() > baseline
+    assert 0 < eng._thread.cache.device_budget <= engine._DEVICE_CACHE_BYTES
+    _run_once(eng, img.copy(), [_config("blur")], 7)
+    gc.collect()
+    assert _cached_depths(eng, tensors=True) == [] and _cached_depths(eng) == [0]
+    assert torch.cuda.memory_allocated() == baseline
 
 
 # ──────────────────────────────────────────────

@@ -77,7 +77,7 @@ def run_tensor(self, lq: Tensor, hq: Tensor) -> tuple[Tensor, Tensor]   # option
   steps share one `_degrade`); tested per step and variant.
 - Engine: with CUDA, two or more consecutive steps with `run_tensor` run as a group: one upload at its first step,
   one download at its last; seeding per step as before. Step times are CUDA-event times on the stream (the first
-  step's includes the upload, the last step's the download). The prefix cache stores outputs at group ends only:
+  step's includes the upload, the last step's the download). The prefix cache stores arrays at group ends and the `run_tensor` outputs of earlier group steps as tensors on the device, under their own budget of min(2 GiB, 25 % of free device memory at first GPU use) with the same eviction order; a resume from a tensor continues the group on the GPU, bit-identical to a cold run; a resume can split a group.
   an edit inside a group re-runs from the group's start (still bit-identical); a resume can split a group.
   A failed upload fails that step; a failed download fails the run.
 `schema.py` additions: each param may carry `"help": str`; `CATEGORY_OF: dict[key, str]` (Blur/Filter, Noise/Grain,

@@ -3,7 +3,8 @@ Processing engine for the WTP Degradation Preview GUI.
 
 Runs the degradation pipeline on a worker thread with per-step timing, error
 capture, deterministic per-step seeding, a cache of step outputs (a run
-resumes after the longest unchanged prefix) and GPU-resident hand-off between
+resumes after the longest unchanged prefix, from host memory or, inside a
+group of GPU steps, from the device) and GPU-resident hand-off between
 consecutive GPU steps, and holds the image helpers the window needs.
 """
 
@@ -26,7 +27,9 @@ import video_backend
 logger = logging.getLogger(__name__)
 
 _SUMMARY_LEN = 120
-_CACHE_BUDGET_BYTES = 1536 * 1024 ** 2  # cached step outputs (1.5 GiB)
+_CACHE_BUDGET_BYTES = 1536 * 1024 ** 2  # cached step outputs in host memory (1.5 GiB)
+_DEVICE_CACHE_BYTES = 2 * 1024 ** 3      # cached tensors of steps inside GPU groups: at most 2 GiB
+_DEVICE_CACHE_SHARE = 0.25               # and this share of the GPU memory free at first use
 
 
 @dataclass
@@ -107,14 +110,25 @@ def _seed_step(seed, index):
 
 @dataclass
 class _CacheEntry:
+    """A step's output: copies of its arrays, or for a step inside a GPU group
+    (a tensor entry) the tensors its run_tensor left, uncopied."""
     depth: int          # index of the step that produced it
-    lq: np.ndarray
-    hq: np.ndarray      # is lq when the step left one array as both
+    lq: object          # np.ndarray, or a CUDA tensor in a tensor entry
+    hq: object          # is lq when the step left one array as both
     hq_changed: bool    # RunResult.hq_changed up to and including this step
     used: int           # the last run that stored it or resumed through it
+    # Tensor entries only: per lq and hq, while it is still the group's upload,
+    # the cached array that upload came from (the cold run passes that array
+    # on), else None
+    sources: tuple | None = None
 
-    def arrays(self):
-        return (self.lq,) if self.hq is self.lq else (self.lq, self.hq)
+    def arrays(self, tensors=False):
+        """The distinct host arrays the entry holds, or with tensors its CUDA tensors."""
+        if self.sources is None:
+            held = () if tensors else (self.lq, self.hq)
+        else:
+            held = (self.lq, self.hq) if tensors else self.sources
+        return tuple({id(array): array for array in held if array is not None}.values())
 
 
 class _StepCache:
@@ -127,7 +141,9 @@ class _StepCache:
     different source array object or video backend clears the cache (callers
     pass a new array for a new image and never modify one in place). Steps
     may write into their inputs (halo does), so no step ever receives a
-    cached array. A GPU group stores only its last step's output.
+    cached array. The last step of a GPU group is stored as arrays, the steps
+    before it as tensor entries on the device (run_tensor never writes into
+    its inputs), under a budget of their own.
     """
 
     def __init__(self):
@@ -135,6 +151,7 @@ class _StepCache:
         self.backend = None
         self.entries = {}  # (seed, tuple of config JSON up to the step) -> _CacheEntry
         self.run_id = 0
+        self.device_budget = None  # bytes for tensor entries, set by the first run on a GPU
 
     def begin(self, source, backend, configs, seed):
         """Start a run. Returns the per-step keys of the request, the number of
@@ -158,12 +175,13 @@ class _StepCache:
 
     def store(self, key, depth, lq, hq, hq_copy, hq_changed):
         """Keep copies of a step's output. hq_copy is a cached array equal to
-        hq, or None. Returns the cached array now equal to hq (hq_copy as given
-        when the output alone exceeds the budget and is not kept)."""
+        hq, or None. Returns the cached arrays now equal to lq and hq (None and
+        hq_copy as given when the output alone exceeds the budget and is not
+        kept)."""
         shared = lq is hq
         nbytes = lq.nbytes + (0 if shared or hq_copy is not None else hq.nbytes)
         if nbytes > _CACHE_BUDGET_BYTES:
-            return hq_copy
+            return None, hq_copy
         lq_copy = lq.copy(order="K")
         if shared:
             hq_copy = lq_copy
@@ -171,28 +189,41 @@ class _StepCache:
             hq_copy = hq.copy(order="K")
         self.entries[key] = _CacheEntry(depth, lq_copy, hq_copy, hq_changed, self.run_id)
         self._evict()
-        return hq_copy
+        return lq_copy, hq_copy
+
+    def store_tensors(self, key, depth, lq, hq, sources, hq_changed):
+        """Keep the tensors a step inside a GPU group left, as they are."""
+        self.entries[key] = _CacheEntry(depth, lq, hq, hq_changed, self.run_id, sources)
+        self._evict()
 
     def _evict(self):
-        """Drop entries until the cached arrays fit the budget: entries of
-        older runs first (stale branches of earlier edits), then the
-        shallowest, since edits to the last steps are the common case. An
-        array shared by several entries counts once."""
-        holders = {}  # id(array) -> [nbytes, entries holding it]
-        for entry in self.entries.values():
-            for array in entry.arrays():
-                holders.setdefault(id(array), [array.nbytes, 0])[1] += 1
-        total = sum(nbytes for nbytes, _ in holders.values())
-        order = sorted(self.entries.items(), key=lambda item: (item[1].used, item[1].depth))
-        for key, entry in order:
-            if total <= _CACHE_BUDGET_BYTES:
-                break
-            del self.entries[key]
-            for array in entry.arrays():
-                holder = holders[id(array)]
-                holder[1] -= 1
-                if holder[1] == 0:
-                    total -= holder[0]
+        """Drop entries until the cached host arrays fit the host budget and
+        the cached tensors the device budget: entries of older runs first
+        (stale branches of earlier edits), then the shallowest, since edits to
+        the last steps are the common case. An array or tensor held by several
+        entries counts once (each cached tensor owns its memory: it is an
+        upload or a settled output)."""
+        for tensors, budget in ((False, _CACHE_BUDGET_BYTES), (True, self.device_budget)):
+            held = {key: entry.arrays(tensors) for key, entry in self.entries.items()}
+            holders = {}  # id(array) -> [nbytes, entries holding it]
+            for arrays in held.values():
+                for array in arrays:
+                    holders.setdefault(id(array), [array.nbytes, 0])[1] += 1
+            if not holders:
+                continue
+            total = sum(nbytes for nbytes, _ in holders.values())
+            order = sorted(held, key=lambda key: (self.entries[key].used, self.entries[key].depth))
+            for key in order:
+                if total <= budget:
+                    break
+                if not held[key]:
+                    continue
+                del self.entries[key]
+                for array in held[key]:
+                    holder = holders[id(array)]
+                    holder[1] -= 1
+                    if holder[1] == 0:
+                        total -= holder[0]
 
 
 def _run_step(config, index, lq, hq, seed, get_class, failed_modules):
@@ -217,6 +248,13 @@ def _run_step(config, index, lq, hq, seed, get_class, failed_modules):
     return lq, hq, [StepResult(index, type_key, elapsed_ms, error, summary)]
 
 
+def _device_budget():
+    """Bytes the cache may keep on the GPU: _DEVICE_CACHE_BYTES, at most
+    _DEVICE_CACHE_SHARE of the device memory free now."""
+    free, _ = sys.modules["torch"].cuda.mem_get_info()
+    return min(_DEVICE_CACHE_BYTES, int(free * _DEVICE_CACHE_SHARE))
+
+
 def _gpu_handoff():
     """optimized.gpu_degradations when steps can hand tensors over on a CUDA
     device, else None."""
@@ -234,41 +272,55 @@ def _is_rgb(img):
     return img.ndim == 3 and img.shape[2] == 3
 
 
-def _group_end(configs, index, lq, hq, gpu, get_class):
-    """End (exclusive) of the run of steps from index whose classes define
-    run_tensor, when the GPU hand-off applies; else index + 1."""
+def _group_end(configs, index, get_class):
+    """End (exclusive) of the run of steps from index whose classes define run_tensor."""
     end = index
-    if gpu is not None and _is_rgb(lq) and _is_rgb(hq):
-        while end < len(configs) and hasattr(get_class(configs[end]["type"]), "run_tensor"):
-            end += 1
-    return max(end, index + 1)
+    while end < len(configs) and hasattr(get_class(configs[end]["type"]), "run_tensor"):
+        end += 1
+    return end
 
 
-def _run_group(gpu, configs, start, end, lq, hq, seed, get_class):
+def _run_group(gpu, configs, start, end, lq, hq, sources, seed, get_class, resume=None,
+               keep=False):
     """Run configs[start:end] through run_tensor with lq and hq on the GPU:
-    uploaded at the first step, downloaded at the last. Between steps a new
+    uploaded at the first step, or continued from resume (the tensor entry of
+    step start - 1), and downloaded after the last. Between steps a new
     output is settled exactly as a download and an upload would leave it, so
     the result is bit-identical to running each step's run() in turn.
+
+    lq and hq are the arrays the group's uploads stand for, passed on as they
+    are while the steps leave them unchanged (as run() does); sources are
+    cached arrays equal to them, or None. With keep, the tensors after each
+    step but the last, up to the first failure, are returned for the cache
+    as (index, lq, hq, sources), unless an unchanged upload has no source.
 
     Step times come from CUDA events on the stream: the first step's includes
     the upload, the last step's the download. A failed upload fails the step
     (the next one tries again); a failed download fails the run.
-    Returns (lq, hq, [StepResult]).
+    Returns (lq, hq, [StepResult], kept).
     """
     torch = sys.modules["torch"]
     events = [torch.cuda.Event(enable_timing=True) for _ in range(end - start + 1)]
     events[0].record()
-    lq_up = hq_up = lq_t = hq_t = None
+    if resume is None:
+        uploaded = False
+        lq_up = hq_up = lq_t = hq_t = None
+    else:
+        uploaded = True
+        lq_t, hq_t = resume.lq, resume.hq
+        lq_up = lq_t if sources[0] is not None else None
+        hq_up = hq_t if sources[1] is not None else None
     outcomes = []  # (error, summary) per step
+    kept = []
     for index in range(start, end):
         config = configs[index]
         error = summary = None
         _seed_step(seed, index)
         try:
-            if lq_up is None:
+            if not uploaded:
                 lq_t = gpu.image_to_tensor(lq)
                 hq_t = lq_t if hq is lq else gpu.image_to_tensor(hq)
-                lq_up, hq_up = lq_t, hq_t
+                lq_up, hq_up, uploaded = lq_t, hq_t, True
             lq_out, hq_out = get_class(config["type"])(config).run_tensor(lq_t, hq_t)
             if index < end - 1:  # the last step's outputs are downloaded instead
                 # An input returned as is is unchanged; anything else is new
@@ -279,12 +331,18 @@ def _run_group(gpu, configs, start, end, lq, hq, seed, get_class):
         except Exception as exc:
             error = traceback.format_exc()
             summary = _exception_summary(exc)
+            keep = False  # the later outputs depend on the failure
         else:
             lq_t, hq_t = lq_out, hq_out
+            lq_known = lq_t is not lq_up or sources[0] is not None
+            hq_known = hq_t is not hq_up or sources[1] is not None
+            if keep and index < end - 1 and lq_known and hq_known:
+                kept.append((index, lq_t, hq_t, (sources[0] if lq_t is lq_up else None,
+                                                 sources[1] if hq_t is hq_up else None)))
         outcomes.append((error, summary))
         if index < end - 1:
             events[index - start + 1].record()
-    if lq_up is None:  # nothing was uploaded, so every step failed
+    if not uploaded:  # nothing was uploaded, so every step failed
         lq_new, hq_new = lq, hq
     else:
         lq_new = lq if lq_t is lq_up else gpu.tensor_to_image(lq_t, 3)
@@ -296,7 +354,7 @@ def _run_group(gpu, configs, start, end, lq, hq, seed, get_class):
                    events[pos].elapsed_time(events[pos + 1]), error, summary)
         for pos, (index, (error, summary)) in enumerate(zip(range(start, end), outcomes))
     ]
-    return lq_new, hq_new, steps
+    return lq_new, hq_new, steps, kept
 
 
 def _run_pipeline(cache, source, configs, seed):
@@ -305,44 +363,75 @@ def _run_pipeline(cache, source, configs, seed):
     from pipeline.utils.registry import get_class
 
     t_run = time.perf_counter()
+    gpu = _gpu_handoff()
+    if gpu is not None and cache.device_budget is None:
+        cache.device_budget = _device_budget()
     keys, start, entry = cache.begin(source, video_backend.detect(), configs, seed)
     steps = [StepResult(i, configs[i]["type"], 0.0, None, None, cached=True) for i in range(start)]
+    resume = None  # a tensor entry whose GPU group the run goes on with
     if entry is None:
         lq = source.copy()
         hq = source.copy()
-        hq_copy, hq_changed = None, False
-    else:
+        lq_copy, hq_copy, hq_changed = None, source, False
+    elif entry.sources is None:
         # Fresh copies, one array for both when the cold run had one, so the
         # remaining steps see exactly what they would have seen
         lq = entry.lq.copy(order="K")
         hq = lq if entry.hq is entry.lq else entry.hq.copy(order="K")
-        hq_copy, hq_changed = entry.hq, entry.hq_changed
-    # hq_copy is a cached array equal to the working hq, or None when unknown;
-    # entries share it while no step replaces HQ (steps write into lq, never
-    # into an hq they return unchanged, unless hq is also their lq).
+        lq_copy, hq_copy, hq_changed = entry.lq, entry.hq, entry.hq_changed
+    else:
+        # Inside a GPU group: it goes on from the cached tensors, and fresh
+        # copies of the sources stand for the arrays the cold run's group
+        # would pass on as they are (None where a step replaced the upload)
+        resume = entry
+        lq_copy, hq_copy = entry.sources
+        lq = hq = None
+        if lq_copy is not None:
+            lq = lq_copy.copy(order="K")
+        if hq_copy is lq_copy:
+            hq = lq
+        elif hq_copy is not None:
+            hq = hq_copy.copy(order="K")
+        hq_changed = entry.hq_changed
+    # lq_copy and hq_copy are cached arrays equal to the working lq and hq, or
+    # None when unknown (the source is one for hq, never handed to a step).
+    # Entries share hq_copy while no step replaces HQ (steps write into lq,
+    # never into an hq they return unchanged, unless hq is also their lq);
+    # lq_copy holds only until the next step runs.
     # Only successful steps are cached. After a failed step nothing more is:
     # the later steps' outputs depend on the failure. Consecutive GPU steps
-    # run as one group, cached at its end only.
+    # run as one group, cached as arrays at its end and as tensors before.
     caching = True
-    gpu = _gpu_handoff()
     index = start
-    while index < len(configs):
-        hq_in, hq_shape, shared_in = hq, hq.shape, lq is hq
-        end = _group_end(configs, index, lq, hq, gpu, get_class)
-        if end - index > 1:
-            lq, hq, done = _run_group(gpu, configs, index, end, lq, hq, seed, get_class)
+    while index < len(configs) or resume is not None:
+        hq_in, shared_in, sources = hq, lq is hq, (lq_copy, hq_copy)
+        lq_copy = None
+        if resume is not None or (gpu is not None and _is_rgb(lq) and _is_rgb(hq)):
+            end = _group_end(configs, index, get_class)
         else:
+            end = index
+        if resume is not None or end - index > 1:
+            lq, hq, done, kept = _run_group(gpu, configs, index, end, lq, hq, sources, seed,
+                                            get_class, resume, caching and cache.device_budget > 0)
+            for depth, lq_t, hq_t, held in kept:
+                cache.store_tensors(keys[depth], depth, lq_t, hq_t, held,
+                                    hq_changed or held[1] is None)
+            resume = None
+            replaced = hq is not hq_in
+        else:
+            end = index + 1
+            hq_shape = hq.shape
             lq, hq, done = _run_step(configs[index], index, lq, hq, seed, get_class,
                                      FAILED_MODULES)
+            replaced = hq is not hq_in or hq.shape != hq_shape
         steps.extend(done)
-        replaced = hq is not hq_in or hq.shape != hq_shape
         hq_changed = hq_changed or replaced
         if replaced or shared_in:  # a write into lq may have reached hq
             hq_copy = None
         if any(step.error is not None for step in done):
             caching = False
-        elif caching:
-            hq_copy = cache.store(keys[end - 1], end - 1, lq, hq, hq_copy, hq_changed)
+        elif caching and done:
+            lq_copy, hq_copy = cache.store(keys[end - 1], end - 1, lq, hq, hq_copy, hq_changed)
         index = end
     lq_u8 = _to_uint8(lq)
     hq_u8 = _to_uint8(hq) if hq_changed else None
@@ -375,8 +464,9 @@ class PipelineEngine(QObject):
     A request made while busy replaces any earlier waiting request and runs
     as soon as the current one finishes. A run resumes after the longest
     prefix of steps it shares with earlier runs on the same source array and
-    seed. A failing step is recorded in its StepResult and skipped; ``failed``
-    fires only when the engine itself breaks.
+    seed, inside a group of GPU steps without leaving the device. A failing
+    step is recorded in its StepResult and skipped; ``failed`` fires only
+    when the engine itself breaks.
     """
 
     result_ready = Signal(object)  # RunResult
