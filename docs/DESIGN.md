@@ -175,3 +175,14 @@ first use through `cuda_ext` (Windows needs `#undef small`: the SDK's rpcndr.h d
 
 Riemersma goes to the kernel in the GUI too (on Windows chainner_ext's riemersma is slower than on Linux, so the
 single-thread kernel still wins 1.1-1.6x); in traiNNer it is routed to the kernel from batch 2 upward.
+
+### Video backend and hand-off (2026-10-09, lanes G2/G3)
+System ffmpeg (located path, then PATH) is the primary video backend, PyAV the fallback; the header chip shows
+which is active and switches. Verified: both backends give identical results for H.264/HEVC/VP9/MPEG-2 at 4:4:4
+and 4:2:2 at 256²; at 4:2:0 they differ by ~1 level in 255 on average (different RGB->4:2:0 conversions in the two
+FFmpeg builds). Known faults left in the PyAV path (pre-existing, the system path is correct): 4:2:2 at odd heights
+differs by up to 56-61 levels; MPEG-2 below ~40 px produces a garbled stream. System ffmpeg costs ~65-70 ms of
+process start-up per run, so for small images PyAV is faster (H.264 at 64²: 84 vs 14 ms); the benchmark at 1024²
+and 2048² decides whether that evens out. GPU-resident hand-off: consecutive GPU steps run as a group (one upload,
+one download, bit-identical); cache entries inside a group are GPU tensors (G3) so a slider edit on a late GPU
+step re-runs only that step.
