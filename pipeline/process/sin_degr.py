@@ -1,10 +1,30 @@
 from .utils import probability
-from dataset_support import sin_patern
 import random
 import numpy as np
 from ..utils.registry import register_class
 from ..utils.random import safe_uniform
 import logging
+
+
+def sin_patern(
+    img: np.ndarray, shape_sin: int, alpha: float, vertical: bool, bias: float
+) -> np.ndarray:
+    """Adds a sine wave of period `shape_sin` px and amplitude `alpha` across the image,
+    shifted by `bias` px per line, clipped to [0, 1] (port of dataset_support 0.1.4's
+    sin_patern; vertical=True runs the wave along each row)."""
+    h, w = img.shape[:2]
+    steps = np.arange(shape_sin, dtype=np.float32)
+    tile = np.sin(np.float32(3.14) * steps / np.float32(shape_sin / 2.0)) * np.float32(alpha)
+    if vertical:
+        shift = np.trunc(np.arange(h, dtype=np.float32) * np.float32(bias)).astype(np.int64)
+        index = (np.arange(w)[None, :] - shift[:, None]) % shape_sin
+    else:
+        shift = np.trunc(np.arange(w, dtype=np.float32) * np.float32(bias)).astype(np.int64)
+        index = (shift[None, :] - np.arange(h)[:, None]) % shape_sin
+    pattern = tile[index]
+    if img.ndim == 3:
+        pattern = pattern[:, :, None]
+    return np.clip(img + pattern, 0.0, 1.0).astype(np.float32)
 
 
 @register_class("sin")

@@ -1,6 +1,6 @@
 import random
 import numpy as np
-from pepeline.pepeline import fast_color_level
+from pepeline import color_levels
 
 from .utils import probability
 from ..constants import INTERPOLATION_MAP, SUBSAMPLING_MAP, YUV_MAP
@@ -73,7 +73,7 @@ class Subsampling:
         Returns:
             np.ndarray: Image after applying downscaling and upscaling.
         """
-        return fast_color_level(
+        return color_levels(
             resize(
                 resize(
                     lq,

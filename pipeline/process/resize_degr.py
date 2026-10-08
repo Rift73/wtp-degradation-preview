@@ -1,7 +1,7 @@
 import numpy as np
 from numpy import random
 from chainner_ext import resize
-from pepeline import fast_color_level
+from pepeline import color_levels
 from pepedpid import dpid_resize, cubic_resize
 from ..constants import INTERPOLATION_MAP
 from .utils import probability
@@ -176,6 +176,6 @@ class Resize:
         )
 
         if self.color_fix:
-            lq = fast_color_level(lq, 0, 254)
-            hq = fast_color_level(hq, 0, 254)
+            lq = color_levels(lq, 0, 254)
+            hq = color_levels(hq, 0, 254)
         return lq.squeeze().clip(0,1), hq.squeeze().clip(0,1)

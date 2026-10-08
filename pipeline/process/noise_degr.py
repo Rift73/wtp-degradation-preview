@@ -4,12 +4,32 @@ import colour
 from .custom_blur import motion_blur
 from .utils import probability, normalize_noise as normalize
 from ..constants import NOISE_MAP
-from pepeline import noise_generate
+from pepeline import noise as pepeline_noise
 from chainner_ext import resize, ResizeFilter
 from ..utils.random import safe_uniform, safe_arange, safe_randint
 import cv2 as cv
 from ..utils.registry import register_class
 import logging
+
+
+def procedural_noise(
+    shape: tuple, noise_type, octaves: int, frequency: float, lacunarity: float
+) -> np.ndarray:
+    """Fractal noise in [-1, 1]: octave i samples at frequency * lacunarity**i with weight
+    0.5**i, normalised by the weight sum (pepeline 0.3's noise_generate). A 3-D shape gets an
+    independent 2-D field per channel: pepeline 1.x's own 3-D path divides every channel by
+    the channel count."""
+    amplitudes = [0.5**i for i in range(octaves)]
+    frequencies = [frequency * lacunarity**i for i in range(octaves)]
+    if len(shape) == 2:
+        return pepeline_noise(shape, octaves, amplitudes, frequencies, [noise_type])
+    return np.stack(
+        [
+            pepeline_noise(shape[:2], octaves, amplitudes, frequencies, [noise_type])
+            for _ in range(shape[2])
+        ],
+        axis=-1,
+    )
 
 
 @register_class("noise")
@@ -128,16 +148,11 @@ class Noise:
         return np.where(noise_mask, noise, 0)
 
     def __procedural_noises(self, lq: np.ndarray) -> np.ndarray:
-        octaves = np.random.choice(self.octaves_rand)
-        frequency = np.random.choice(self.frequency_rand)
-        lacunarity = np.random.choice(self.lacunarity_rand)
-        noise = noise_generate(
-            lq.shape,
-            NOISE_MAP[self.noise_type],
-            octaves,
-            frequency,
-            lacunarity,
-            None,
+        octaves = int(np.random.choice(self.octaves_rand))
+        frequency = float(np.random.choice(self.frequency_rand))
+        lacunarity = float(np.random.choice(self.lacunarity_rand))
+        noise = procedural_noise(
+            lq.shape, NOISE_MAP[self.noise_type], octaves, frequency, lacunarity
         )
         if self.normalize_noise:
             noise = normalize(noise)
@@ -266,10 +281,8 @@ class Noise:
             tuple: A tuple containing the noisy low-quality image and the corresponding high-quality image.
         """
         NOISE_TYPE_MAP = {
-            "perlinsuflet": self.__procedural_noises,
             "perlin": self.__procedural_noises,
             "opensimplex": self.__procedural_noises,
-            "simplex": self.__procedural_noises,
             "supersimplex": self.__procedural_noises,
             "uniform": self.__uniform_noise,
             "gauss": self.__gauss,

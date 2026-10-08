@@ -1,5 +1,5 @@
 import cv2
-from pepeline import screentone, cvt_color, CvtType
+from pepeline import screentone as pepeline_screentone, cvt_color, CVTColor, DotType
 import numpy as np
 from numpy import random
 
@@ -8,6 +8,14 @@ from ..constants import DOT_TYPE
 from ..utils.random import safe_uniform, safe_arange
 from ..utils.registry import register_class
 import logging
+
+
+def screentone(
+    img: np.ndarray, dot_size: int, angle: int = 0, dot_type: DotType = DotType.CIRCLE
+) -> np.ndarray:
+    """pepeline 0.3 call shape: angle 0 is the unrotated pattern (pepeline 1.x rotates
+    whenever an angle is given, 0 included)."""
+    return pepeline_screentone(img, dot_size, angle or None, dot_type)
 
 
 @register_class("screentone")
@@ -70,7 +78,7 @@ class Screentone:
         dot_type4 = DOT_TYPE.get(
             random.choice(self.dot_types_list[3]), DOT_TYPE["circle"]
         )
-        lq = cvt_color(lq, CvtType.RGB2CMYK)
+        lq = cvt_color(lq, CVTColor.RGB2CMYK)
         lq[..., 0] = screentone(lq[..., 0], dot_size, c_angle, dot_type1)
         lq[..., 1] = screentone(lq[..., 1], dot_size, m_angle, dot_type2)
         lq[..., 2] = screentone(lq[..., 2], dot_size, y_angle, dot_type3)
@@ -81,7 +89,7 @@ class Screentone:
         logging.debug(
             f"Screentone - type: cmyk dot: {dot_size} cmyk_angle: {c_angle} {m_angle} {y_angle} {k_angle} cmyk_dot_type: {dot_type1} {dot_type2} {dot_type3} {dot_type4}",
         )
-        return cvt_color(lq, CvtType.CMYK2RGB), hq
+        return cvt_color(lq, CVTColor.CMYK2RGB), hq
 
     def __not_rot_halftone(
         self, lq: np.ndarray, hq: np.ndarray, dot_size: int

@@ -1,6 +1,5 @@
 import numpy as np
-from pepeline import cvt_color, CvtType
-from dataset_support import gray_or_color
+from pepeline import cvt_color, CVTColor
 import cv2 as cv
 
 
@@ -27,6 +26,13 @@ def normalize_noise(img: np.ndarray) -> np.ndarray:
     return (img - minimum) * (1 + 1) / (maximum - minimum) - 1
 
 
+def gray_or_color(img: np.ndarray, threshold: float) -> bool:
+    """True when the means of the R, G and B channels all lie within `threshold` of each
+    other (port of dataset_support 0.1.4's gray_or_color)."""
+    means = img[:, :, :3].mean(axis=(0, 1))
+    return float(means.max() - means.min()) <= threshold
+
+
 def color_or_gray(img: np.ndarray) -> np.ndarray:
     if gray_or_color(img, 0.0003):
         return img2gray(img)
@@ -35,7 +41,7 @@ def color_or_gray(img: np.ndarray) -> np.ndarray:
 
 def img2gray(img: np.ndarray) -> np.ndarray:
     if img.ndim != 2 and img.shape[2] != 1:
-        return cvt_color(img, CvtType.RGB2GrayBt2020)
+        return cvt_color(img, CVTColor.RGB2Gray_2020)
     else:
         return img
 

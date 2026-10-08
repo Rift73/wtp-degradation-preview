@@ -1,4 +1,4 @@
-from pepeline import fast_color_level
+from pepeline import color_levels
 from .utils import probability
 import numpy as np
 from ..utils.registry import register_class
@@ -48,7 +48,7 @@ class Color:
         if low_output > high_output:
             high_output = low_output + 10
         gamma = safe_uniform(self.gamma)
-        lq = fast_color_level(
+        lq = color_levels(
             lq,
             in_low=in_low,
             in_high=in_high,

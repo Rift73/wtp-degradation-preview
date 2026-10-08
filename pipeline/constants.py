@@ -1,6 +1,6 @@
 import cv2
 from chainner_ext import ResizeFilter
-from pepeline import TypeNoise, TypeDot
+from pepeline import TypeNoise, DotType
 from chainner_ext import DiffusionAlgorithm
 
 INTERPOLATION_MAP = {
@@ -18,11 +18,9 @@ INTERPOLATION_MAP = {
     "gauss": ResizeFilter.Gauss,
 }
 NOISE_MAP = {
-    "perlinsuflet": TypeNoise.PERLINSURFLET,
     "perlin": TypeNoise.PERLIN,
-    "opensimplex": TypeNoise.OPENSIMPLEX,
-    "simplex": TypeNoise.SIMPLEX,
-    "supersimplex": TypeNoise.SUPERSIMPLEX,
+    "opensimplex": TypeNoise.OPENSIMPLEX2,
+    "supersimplex": TypeNoise.SUPERSIMPLEX2S,
 }
 DITHERING_MAP = {
     "floydsteinberg": DiffusionAlgorithm.FloydSteinberg,
@@ -63,8 +61,8 @@ JPEG_SUBSAMPLING = {
 }
 VIDEO_SUBSAMPLING = {"444": "yuv444p", "422": "yuv422p", "420": "yuv420p"}
 DOT_TYPE = {
-    "line": TypeDot.LINE,
-    "cross": TypeDot.CROSS,
-    "circle": TypeDot.CIRCLE,
-    "ellipse": TypeDot.ELLIPSE,
+    "line": DotType.LINE,
+    "cross": DotType.CROSS,
+    "circle": DotType.CIRCLE,
+    "ellipse": DotType.ELLIPSE,
 }
