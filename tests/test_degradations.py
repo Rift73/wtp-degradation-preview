@@ -368,6 +368,77 @@ def test_engine_display_arrays():
     assert resized.hq_u8.shape == resized.hq.shape and resized.lq_u8.shape == resized.lq.shape
 
 
+def _hq_chain(alpha, lqhq=False):
+    # Resize replaces HQ and blur leaves it alone; noise leaves it alone too,
+    # unless lqhq makes its noisy lq the HQ as well
+    return [_config("resize"), _config("blur"), dict(_config("noise", alpha=alpha), lqhq=lqhq)]
+
+
+def test_engine_display_hq_reuse():
+    img = _image()
+    eng = engine.PipelineEngine()
+    first = _run_once(eng, img, _hq_chain(0.05), 2)
+    assert first.hq_changed and not first.hq_same_as_previous
+    # Only the last step runs, and it leaves HQ alone: the previous hq_u8 is reused
+    edited = _run_once(eng, img, _hq_chain(0.2), 2)
+    cold = _run_once(engine.PipelineEngine(), img, _hq_chain(0.2), 2)
+    assert edited.cached_steps == 2 and not cold.hq_same_as_previous
+    assert edited.hq_same_as_previous and edited.hq_u8 is first.hq_u8
+    assert np.array_equal(edited.hq, first.hq) and np.array_equal(edited.hq, cold.hq)
+    assert np.array_equal(edited.hq_u8, cold.hq_u8)
+    assert not np.array_equal(edited.lq, first.lq), "the edit had no effect"
+    again = _run_once(eng, img, _hq_chain(0.2), 2)  # every step cached
+    assert again.hq_same_as_previous and again.hq_u8 is first.hq_u8
+    # A failed step leaves the display as before (converted and compared anew)
+    failing = _run_once(eng, img, _hq_chain(0.2) + [{"type": "no_such_type"}], 2)
+    assert failing.cached_steps == 3 and failing.steps[3].error is not None
+    assert not failing.hq_same_as_previous and failing.hq_u8 is not first.hq_u8
+    assert np.array_equal(failing.hq_u8, cold.hq_u8)
+    # A step after the resume point replaces HQ: new pixels, not the same
+    eng = engine.PipelineEngine()
+    first = _run_once(eng, img, _hq_chain(0.05, lqhq=True), 2)
+    edited = _run_once(eng, img, _hq_chain(0.2, lqhq=True), 2)
+    cold = _run_once(engine.PipelineEngine(), img, _hq_chain(0.2, lqhq=True), 2)
+    assert edited.cached_steps == 2 and not edited.hq_same_as_previous
+    assert not np.array_equal(edited.hq_u8, first.hq_u8)
+    assert np.array_equal(edited.hq_u8, cold.hq_u8)
+    # A new source array clears it, even with equal pixels
+    eng = engine.PipelineEngine()
+    first = _run_once(eng, img, _hq_chain(0.05), 2)
+    for source in (img.copy(), img):
+        run = _run_once(eng, source, _hq_chain(0.05), 2)
+        assert run.cached_steps == 0 and not run.hq_same_as_previous
+        assert run.hq_u8 is not first.hq_u8 and np.array_equal(run.hq_u8, first.hq_u8)
+
+
+def test_engine_display_hq_budget():
+    img = _image()
+    run = _run_once(engine.PipelineEngine(), img, _hq_chain(0.05), 2)
+    assert run.lq.shape != run.hq.shape
+    held = 3 * run.lq.nbytes + run.hq.nbytes  # three lq and the shared hq
+    budget = engine._CACHE_BUDGET_BYTES
+    try:
+        # The cached hq_u8 counts in the host budget: one byte short evicts the
+        # shallowest entry once the run ends
+        for extra, depths in ((0, [0, 1, 2]), (-1, [1, 2])):
+            engine._CACHE_BUDGET_BYTES = held + run.hq_u8.nbytes + extra
+            eng = engine.PipelineEngine()
+            first = _run_once(eng, img, _hq_chain(0.05), 2)
+            assert sorted(e.depth for e in eng._thread.cache.entries.values()) == depths
+            assert eng._thread.cache.shown_u8 is first.hq_u8
+            assert _run_once(eng, img, _hq_chain(0.2), 2).hq_same_as_previous
+        # Forgotten with the last entry holding its HQ
+        engine._CACHE_BUDGET_BYTES = held + run.hq_u8.nbytes
+        eng = engine.PipelineEngine()
+        _run_once(eng, img, _hq_chain(0.05), 2)
+        cache = eng._thread.cache
+        cache.entries.clear()
+        cache._evict()
+        assert cache.shown_hq is None and cache.shown_u8 is None
+    finally:
+        engine._CACHE_BUDGET_BYTES = budget
+
+
 # ──────────────────────────────────────────────
 # (e) seeding
 # ──────────────────────────────────────────────
@@ -884,6 +955,23 @@ def test_engine_gpu_group_last_step_edit():
     assert resumed.cached_steps == len(chain) - 1
     assert _same_bits(resumed.lq, _one_by_one(img, _edit(chain, 6, scanline), 7)[0])
     assert not np.array_equal(first.lq, resumed.lq), "the edit had no effect"
+
+
+def test_engine_gpu_group_display_hq_reuse():
+    if _torch_cuda() is None:
+        print("  SKIP: no CUDA device")
+        return
+    img = _image()
+    # Resize replaces HQ, then one GPU group: the edit of its last step
+    # resumes from a tensor entry, whose HQ upload is still the cached array
+    chain = [_config("resize"), _config("overshoot"), _config("lowpass"), _config("scanline")]
+    eng = engine.PipelineEngine()
+    first = _run_once(eng, img, chain, 5)
+    assert _cached_depths(eng, tensors=True) == [1, 2]
+    resumed = _check_resume(eng, img, chain, 5, 3, _config("scanline", strength=0.6))
+    assert resumed.hq_same_as_previous and resumed.hq_u8 is first.hq_u8
+    cold = _run_once(engine.PipelineEngine(), img, _edit(chain, 3, _config("scanline", strength=0.6)), 5)
+    assert np.array_equal(resumed.hq_u8, cold.hq_u8)
 
 
 def test_engine_gpu_group_middle_step_edit():

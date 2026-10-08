@@ -378,9 +378,14 @@ class MainWindow(QMainWindow):
         lq_dims = _dims_str(result.lq)
         # Reuse a pixmap whenever HQ's bytes did not change, so the view keeps its
         # scaled cache: the source pixmap when no step touched HQ, else the last one.
+        # The engine says when HQ is the previous result's; a result still in
+        # flight when a new image was opened finds no pixmap and compares instead.
         if not result.hq_changed:
             hq_pm = self._source_pixmap
-        elif self._last_hq_u8 is not None and self._last_hq_u8.shape == result.hq_u8.shape                 and np.array_equal(self._last_hq_u8, result.hq_u8):
+        elif result.hq_same_as_previous and self._last_hq_pixmap is not None:
+            hq_pm = self._last_hq_pixmap
+        elif self._last_hq_u8 is not None and self._last_hq_u8.shape == result.hq_u8.shape \
+                and np.array_equal(self._last_hq_u8, result.hq_u8):
             hq_pm = self._last_hq_pixmap
         else:
             hq_pm = numpy_to_qpixmap(result.hq_u8)

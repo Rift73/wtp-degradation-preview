@@ -40,6 +40,9 @@ last dir, ffmpeg path, last pipeline state (autosave on exit, restore on start).
 class StepResult: index: int; type_key: str; elapsed_ms: float; error: str | None; error_summary: str | None
 @dataclass
 class RunResult: lq: np.ndarray; hq: np.ndarray; steps: list[StepResult]; total_ms: float; seed: int
+    # later additions: cached_steps, lq_u8/hq_u8 (uint8 display arrays built in the worker), hq_changed,
+    # hq_same_as_previous (True when the final HQ is the same cached array as the previous result's, so the
+    # engine reused that result's hq_u8 object and main.pyw reuses its pixmap without comparing bytes)
 class PipelineEngine(QObject):
     result_ready = Signal(object)   # RunResult (per-step errors inside, run still completes with that step skipped)
     failed = Signal(str)            # fatal traceback (engine itself broke)

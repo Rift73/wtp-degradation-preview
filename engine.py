@@ -52,7 +52,9 @@ class RunResult:
     cached_steps: int          # leading steps whose output came from the cache
     hq_changed: bool           # a step replaced HQ; False means hq still equals the source
     lq_u8: np.ndarray          # lq clipped and rounded to contiguous uint8, for display
-    hq_u8: np.ndarray | None   # hq likewise, or None when hq_changed is False
+    hq_u8: np.ndarray | None   # hq likewise, or None when hq_changed is False; the previous
+                               # result's own array when hq_same_as_previous (never modify it)
+    hq_same_as_previous: bool  # hq is known to equal the previous run's hq
 
 
 # ──────────────────────────────────────────────
@@ -144,6 +146,10 @@ class _StepCache:
     cached array. The last step of a GPU group is stored as arrays, the steps
     before it as tensor entries on the device (run_tensor never writes into
     its inputs), under a budget of their own.
+
+    The cache also keeps the last run's hq for display, with the cached array
+    it came from: a run that ends on that same array (cached arrays are never
+    modified) reuses it instead of converting hq again.
     """
 
     def __init__(self):
@@ -152,6 +158,8 @@ class _StepCache:
         self.entries = {}  # (seed, tuple of config JSON up to the step) -> _CacheEntry
         self.run_id = 0
         self.device_budget = None  # bytes for tensor entries, set by the first run on a GPU
+        self.shown_hq = None  # the cached array the last run's hq equals, or None when unknown
+        self.shown_u8 = None  # that run's RunResult.hq_u8
 
     def begin(self, source, backend, configs, seed):
         """Start a run. Returns the per-step keys of the request, the number of
@@ -160,6 +168,7 @@ class _StepCache:
             self.source = source
             self.backend = backend
             self.entries.clear()
+            self.shown_hq = self.shown_u8 = None
         self.run_id += 1
         texts = [json.dumps(config, sort_keys=True) for config in configs]
         keys = [(seed, tuple(texts[:i + 1])) for i in range(len(texts))]
@@ -196,15 +205,36 @@ class _StepCache:
         self.entries[key] = _CacheEntry(depth, lq, hq, hq_changed, self.run_id, sources)
         self._evict()
 
+    def display_hq(self, hq, hq_copy, hq_changed):
+        """End a run: returns its RunResult.hq_u8 and hq_same_as_previous.
+        hq_copy is a cached array equal to hq, or None when unknown; the same
+        one as the last run's means the same pixels, so that run's hq_u8 is
+        reused as it is."""
+        same = hq_copy is not None and hq_copy is self.shown_hq
+        if not hq_changed:
+            hq_u8 = None
+        elif same:
+            hq_u8 = self.shown_u8
+        else:
+            hq_u8 = _to_uint8(hq)
+        self.shown_hq, self.shown_u8 = hq_copy, hq_u8
+        self._evict()
+        return hq_u8, same
+
     def _evict(self):
         """Drop entries until the cached host arrays fit the host budget and
         the cached tensors the device budget: entries of older runs first
         (stale branches of earlier edits), then the shallowest, since edits to
         the last steps are the common case. An array or tensor held by several
         entries counts once (each cached tensor owns its memory: it is an
-        upload or a settled output)."""
+        upload or a settled output). shown_u8 counts as held by the entries
+        holding shown_hq, and both are forgotten with the last of them."""
         for tensors, budget in ((False, _CACHE_BUDGET_BYTES), (True, self.device_budget)):
             held = {key: entry.arrays(tensors) for key, entry in self.entries.items()}
+            if not tensors and self.shown_u8 is not None:
+                for key, arrays in held.items():
+                    if any(array is self.shown_hq for array in arrays):
+                        held[key] = arrays + (self.shown_u8,)
             holders = {}  # id(array) -> [nbytes, entries holding it]
             for arrays in held.values():
                 for array in arrays:
@@ -224,6 +254,9 @@ class _StepCache:
                     holder[1] -= 1
                     if holder[1] == 0:
                         total -= holder[0]
+        if self.shown_hq is not None and not any(
+                array is self.shown_hq for entry in self.entries.values() for array in entry.arrays()):
+            self.shown_hq = self.shown_u8 = None
 
 
 def _run_step(config, index, lq, hq, seed, get_class, failed_modules):
@@ -434,9 +467,11 @@ def _run_pipeline(cache, source, configs, seed):
             lq_copy, hq_copy = cache.store(keys[end - 1], end - 1, lq, hq, hq_copy, hq_changed)
         index = end
     lq_u8 = _to_uint8(lq)
-    hq_u8 = _to_uint8(hq) if hq_changed else None
+    # A failed step may have written into hq before it raised, so after one
+    # hq_copy no longer counts as equal to hq
+    hq_u8, hq_same = cache.display_hq(hq, hq_copy if caching else None, hq_changed)
     total_ms = (time.perf_counter() - t_run) * 1000.0
-    return RunResult(lq, hq, steps, total_ms, seed, start, hq_changed, lq_u8, hq_u8)
+    return RunResult(lq, hq, steps, total_ms, seed, start, hq_changed, lq_u8, hq_u8, hq_same)
 
 
 class _RunThread(QThread):
