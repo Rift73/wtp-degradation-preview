@@ -269,7 +269,9 @@ def _lq(configs, seed):
 
 
 def test_engine_seeding():
-    configs = [_config("noise"), _config("noise", type_noise="perlin")]
+    # pepeline 1.x procedural noise (perlin/opensimplex/supersimplex) takes no
+    # seed and is not reproducible; the seedable types are checked here.
+    configs = [_config("noise"), _config("noise", type_noise="uniform")]
     a, b, c = _lq(configs, 7), _lq(configs, 7), _lq(configs, 8)
     assert np.array_equal(a, b), "same seed gave different output"
     assert not np.array_equal(a, c), "different seeds gave the same output"

@@ -98,6 +98,22 @@ def shift_percent(
     )
     return shift(img, amount_x, amount_y, fill_color)
 
+# BT.2020 full-range YCbCr (Cb/Cr offset 0.5) back to RGB. pepeline's own
+# YCbCR2RGB_2020 uses a wrong green coefficient and tints the image green
+# even with a zero shift, so the inverse is done here.
+_KR, _KB = 0.2627, 0.0593
+_KG = 1.0 - _KR - _KB
+
+
+def _ycbcr2020_to_rgb(yuv: np.ndarray) -> np.ndarray:
+    y = yuv[..., 0]
+    cb = yuv[..., 1] - 0.5
+    cr = yuv[..., 2] - 0.5
+    r = y + 2.0 * (1.0 - _KR) * cr
+    g = y - (2.0 * _KB * (1.0 - _KB) / _KG) * cb - (2.0 * _KR * (1.0 - _KR) / _KG) * cr
+    b = y + 2.0 * (1.0 - _KB) * cb
+    return np.stack([r, g, b], axis=-1).astype(np.float32)
+
 
 @register_class("shift")
 class Shift:
@@ -184,7 +200,7 @@ class Shift:
         for c in range(3):
             channel_amount = self.yuv_amount_list[c]
             yuv_img[:, :, c] = self.shift_channel(yuv_img[:, :, c], channel_amount, [1])
-        return cvt_color(yuv_img, CVTColor.YCbCR2RGB_2020)
+        return _ycbcr2020_to_rgb(yuv_img)
 
     def __cmyk_chanel_shift(self, img: np.ndarray) -> np.ndarray:
         """
