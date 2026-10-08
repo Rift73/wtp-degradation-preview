@@ -83,7 +83,7 @@ class Halo:
             diff = np.sign(diff) * np.maximum(0, np.abs(diff) - threshold)
             lq = lq + diff * amount
 
-        return lq
+        return np.clip(lq, 0, 1)
 
     def __unsharp_halo(self, lq):
         rgb = False

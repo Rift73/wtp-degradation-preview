@@ -167,13 +167,6 @@ class Resize:
             int(height),
             algorithm_hq,
         )
-        # Upscale LQ back to HQ size so comparison slider works
-        lq = self.__resize(
-            lq,
-            int(width),
-            int(height),
-            "cubic_mitchell",
-        )
 
         if self.color_fix:
             lq = fast_color_level(lq, 0, 254)

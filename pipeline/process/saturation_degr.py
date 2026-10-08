@@ -42,7 +42,8 @@ class Saturation:
         logging.debug(f"Saturation - {random_saturation:.4f}")
         hsv_image = cv.cvtColor(lq, cv.COLOR_RGB2HSV)
         decreased_saturation = hsv_image.copy()
-        decreased_saturation[:, :, 1] = (
-            decreased_saturation[:, :, 1] * random_saturation
+        # S above 1 (multiplier > 1) would turn into negative RGB values
+        decreased_saturation[:, :, 1] = np.clip(
+            decreased_saturation[:, :, 1] * random_saturation, 0, 1
         )
         return cv.cvtColor(decreased_saturation, cv.COLOR_HSV2RGB), hq

@@ -47,8 +47,10 @@ class FilmGrain:
             f"midtone: {midtone:.2f}"
         )
 
+        # film_grain_pt reads luma from channels 0-2, so grayscale goes in as
+        # three equal channels (luma == gray) and channel 0 comes back out.
         if lq.ndim == 2:
-            tensor = torch.from_numpy(lq[None, None]).cuda()
+            tensor = torch.from_numpy(lq[None, None]).cuda().repeat(1, 3, 1, 1)
         else:
             tensor = torch.from_numpy(lq.transpose(2, 0, 1)[None]).cuda()
 
@@ -56,7 +58,7 @@ class FilmGrain:
 
         out = result.squeeze(0).cpu().numpy()
         if lq.ndim == 2:
-            lq = out.squeeze(0).astype(np.float32)
+            lq = out[0].astype(np.float32)
         else:
             lq = out.transpose(1, 2, 0).astype(np.float32)
         return np.clip(lq, 0, 1), hq

@@ -137,7 +137,7 @@ class Noise:
             octaves,
             frequency,
             lacunarity,
-            None,
+            int(np.random.randint(0, 2**31 - 1)),
         )
         if self.normalize_noise:
             noise = normalize(noise)

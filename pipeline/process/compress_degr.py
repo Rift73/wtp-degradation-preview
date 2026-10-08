@@ -21,13 +21,18 @@ try:
 except ImportError:
     _HAS_PYAV = False
 
+# torchcodec raises RuntimeError (not ImportError) when it finds no loadable
+# shared FFmpeg libraries; PyAV or the ffmpeg CLI then handle the video codecs.
 try:
     import torch
     from torchcodec.encoders import VideoEncoder
     from torchcodec.decoders import VideoDecoder
     _HAS_TORCHCODEC = True
-except ImportError:
+except Exception:
     _HAS_TORCHCODEC = False
+
+# Chroma formats from most to least color resolution
+_CHROMA_ORDER = ["yuv444p", "yuv422p", "yuv420p"]
 
 # TorchCodec codec name + container format mapping
 _TC_CODEC_MAP = {
@@ -100,6 +105,12 @@ class Compress:
         """In-process video codec roundtrip via PyAV. No subprocess spawning."""
         orig_height, orig_width, channel = lq.shape
         sampling = VIDEO_SUBSAMPLING[random.choice(self.video_sampling)]
+        # Like the ffmpeg CLI, step down to the nearest chroma format the
+        # encoder supports (mpeg2video has no 4:4:4, mpeg4 only 4:2:0).
+        supported = {f.name for f in av.codec.Codec(codec, "w").video_formats or ()}
+        if supported and sampling not in supported:
+            fallback = _CHROMA_ORDER[_CHROMA_ORDER.index(sampling):]
+            sampling = next(f for f in fallback if f in supported)
 
         lq, _, _ = self.__pad_to_chroma(lq, sampling)
         height, width = lq.shape[:2]
