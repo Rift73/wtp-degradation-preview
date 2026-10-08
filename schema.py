@@ -209,11 +209,13 @@ def _summary_noise(p):
 
 _reg("noise", "Noise", [
     {"key": "type_noise", "label": "Noise Type", "type": "choice",
-     "options": ["uniform", "gauss", "perlin", "opensimplex",
+     "options": ["uniform", "gauss", "perlin", "simplex", "opensimplex",
                  "supersimplex", "salt", "pepper", "salt_and_pepper"],
      "default": "gauss",
      "help": "Noise distribution: per-pixel (uniform, gauss), procedural "
-             "smooth noise (perlin, simplex...), or impulse (salt/pepper)."},
+             "gradient noise (perlin, simplex; opensimplex and supersimplex "
+             "are rendered with the simplex generator in the preview), or "
+             "impulse (salt/pepper)."},
     {"key": "alpha", "label": "Intensity", "type": "float",
      "min": 0.0, "max": 1.0, "step": 0.005, "default": 0.05, "decimals": 3,
      "help": "Noise strength; bigger values add more noise (salt/pepper "
@@ -224,16 +226,20 @@ _reg("noise", "Noise", [
              "to color (UV)."},
     {"key": "octaves", "label": "Octaves (procedural)", "type": "int",
      "min": 1, "max": 8, "default": 1,
-     "help": "Procedural noise only: number of layered detail levels; bigger "
-             "values add finer detail on top."},
+     "help": "Procedural noise only: number of layers summed; each layer has "
+             "half the strength of the last and its frequency times the "
+             "lacunarity, so it is coarser when lacunarity is below 1 and "
+             "finer when above 1."},
     {"key": "frequency", "label": "Frequency (procedural)", "type": "float",
      "min": 0.01, "max": 5.0, "step": 0.01, "default": 0.8, "decimals": 2,
-     "help": "Procedural noise only: base frequency; bigger values give "
-             "smaller, denser blobs."},
+     "help": "Procedural noise only: base frequency in cycles per pixel, as "
+             "in the destroyer; 0.02-0.1 gives soft blobs, 0.5 and up "
+             "(default 0.8) gives per-pixel grain."},
     {"key": "lacunarity", "label": "Lacunarity (procedural)", "type": "float",
      "min": 0.01, "max": 5.0, "step": 0.01, "default": 0.4, "decimals": 2,
-     "help": "Procedural noise only: frequency step between octaves; bigger "
-             "values make each octave much finer than the last."},
+     "help": "Procedural noise only: frequency ratio from one octave to the "
+             "next; below 1 (default 0.4) each octave is coarser than the "
+             "last, above 1 finer."},
 ], build=_build_noise, summary=_summary_noise)
 
 

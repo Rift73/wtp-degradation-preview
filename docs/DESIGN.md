@@ -110,5 +110,7 @@ Per lane: import smoke + `tests/test_degradations.py` where relevant. Final gate
 - torchcodec removed from compress and requirements: it can never load here (PyAV's FFmpeg DLLs are name-mangled, the FFmpeg build is static) and PyAV covers all seven codecs in-process, which is chaiNNer's own child-process approach done in-process.
 - install.bat/run.bat were LF-ended and cmd misparsed them; now CRLF with ASCII comments, pinned by `.gitattributes`.
 
+- Seeded procedural noise (Lane F): numpy perlin (own code) + a port of chaiNNer's GPL-3.0 simplex; destroyer's cycles-per-pixel frequency kept (0.8 = grain, 0.02-0.1 = blobs) so the preview matches the copied HCL; opensimplex/supersimplex render with the simplex generator on their own seed streams. The GPL-derived source falls under the owner's "publish as is" ruling; noted in README.
+
 ## STATUS
 - [ ] A panel · [ ] B preview · [ ] C engine+pipeline+tests · [ ] D style+README · [ ] main.pyw · [ ] final gate · [ ] commit

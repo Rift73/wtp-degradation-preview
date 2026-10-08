@@ -1,6 +1,6 @@
 import cv2
 from chainner_ext import ResizeFilter
-from pepeline import TypeNoise, DotType
+from pepeline import DotType
 from chainner_ext import DiffusionAlgorithm
 
 INTERPOLATION_MAP = {
@@ -17,10 +17,15 @@ INTERPOLATION_MAP = {
     "lanczos": ResizeFilter.Lanczos,
     "gauss": ResizeFilter.Gauss,
 }
+# Procedural noise types: name -> (generator in process/procedural_noise.py, seed stream,
+# amplitude). opensimplex and supersimplex are rendered with the simplex generator; their own
+# seed stream keeps them different from simplex for the same seed, and the amplitude matches
+# the strength of pepeline 0.3's type of that name (the destroyer's).
 NOISE_MAP = {
-    "perlin": TypeNoise.PERLIN,
-    "opensimplex": TypeNoise.OPENSIMPLEX2,
-    "supersimplex": TypeNoise.SUPERSIMPLEX2S,
+    "perlin": ("perlin", 0, 1.0),
+    "simplex": ("simplex", 1, 1.0),
+    "opensimplex": ("simplex", 2, 0.63),
+    "supersimplex": ("simplex", 3, 1.15),
 }
 DITHERING_MAP = {
     "floydsteinberg": DiffusionAlgorithm.FloydSteinberg,

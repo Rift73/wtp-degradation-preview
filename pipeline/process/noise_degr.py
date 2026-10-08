@@ -2,34 +2,13 @@ import numpy as np
 import colour
 
 from .custom_blur import motion_blur
+from .procedural_noise import fractal_noise
 from .utils import probability, normalize_noise as normalize
-from ..constants import NOISE_MAP
-from pepeline import noise as pepeline_noise
 from chainner_ext import resize, ResizeFilter
 from ..utils.random import safe_uniform, safe_arange, safe_randint
 import cv2 as cv
 from ..utils.registry import register_class
 import logging
-
-
-def procedural_noise(
-    shape: tuple, noise_type, octaves: int, frequency: float, lacunarity: float
-) -> np.ndarray:
-    """Fractal noise in [-1, 1]: octave i samples at frequency * lacunarity**i with weight
-    0.5**i, normalised by the weight sum (pepeline 0.3's noise_generate). A 3-D shape gets an
-    independent 2-D field per channel: pepeline 1.x's own 3-D path divides every channel by
-    the channel count."""
-    amplitudes = [0.5**i for i in range(octaves)]
-    frequencies = [frequency * lacunarity**i for i in range(octaves)]
-    if len(shape) == 2:
-        return pepeline_noise(shape, octaves, amplitudes, frequencies, [noise_type])
-    return np.stack(
-        [
-            pepeline_noise(shape[:2], octaves, amplitudes, frequencies, [noise_type])
-            for _ in range(shape[2])
-        ],
-        axis=-1,
-    )
 
 
 @register_class("noise")
@@ -151,8 +130,14 @@ class Noise:
         octaves = int(np.random.choice(self.octaves_rand))
         frequency = float(np.random.choice(self.frequency_rand))
         lacunarity = float(np.random.choice(self.lacunarity_rand))
-        noise = procedural_noise(
-            lq.shape, NOISE_MAP[self.noise_type], octaves, frequency, lacunarity
+        # Seeded from numpy's global RNG, so the engine's per-step np.random.seed applies
+        noise = fractal_noise(
+            lq.shape,
+            self.noise_type,
+            octaves,
+            frequency,
+            lacunarity,
+            seed=int(np.random.randint(0, 2**31 - 1)),
         )
         if self.normalize_noise:
             noise = normalize(noise)
@@ -162,7 +147,7 @@ class Noise:
         if self.bias != [0, 0]:
             bias = safe_uniform(self.bias)
             noise += bias
-            noise.clip(-1, 1)
+            noise = noise.clip(-1, 1)
         alpha = np.random.choice(self.alpha_rand)
         noise *= alpha
         logging.debug(
@@ -282,6 +267,7 @@ class Noise:
         """
         NOISE_TYPE_MAP = {
             "perlin": self.__procedural_noises,
+            "simplex": self.__procedural_noises,
             "opensimplex": self.__procedural_noises,
             "supersimplex": self.__procedural_noises,
             "uniform": self.__uniform_noise,

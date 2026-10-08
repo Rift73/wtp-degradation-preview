@@ -268,18 +268,47 @@ def _lq(configs, seed):
     return results[0].lq
 
 
+PROCEDURAL_NOISES = ("perlin", "simplex", "opensimplex", "supersimplex")
+
+
 def test_engine_seeding():
-    # pepeline 1.x procedural noise (perlin/opensimplex/supersimplex) takes no
-    # seed and is not reproducible; the seedable types are checked here.
-    configs = [_config("noise"), _config("noise", type_noise="uniform")]
-    a, b, c = _lq(configs, 7), _lq(configs, 7), _lq(configs, 8)
-    assert np.array_equal(a, b), "same seed gave different output"
-    assert not np.array_equal(a, c), "different seeds gave the same output"
+    same_seed = {}
+    for name in PROCEDURAL_NOISES:
+        configs = [_config("noise", type_noise=name)]
+        a, b, c = _lq(configs, 7), _lq(configs, 7), _lq(configs, 8)
+        assert np.array_equal(a, b), f"{name}: same seed gave different output"
+        assert not np.array_equal(a, c), f"{name}: different seeds gave the same output"
+        same_seed[name] = a
+    for i, name in enumerate(PROCEDURAL_NOISES):
+        for other in PROCEDURAL_NOISES[i + 1:]:
+            assert not np.array_equal(same_seed[name], same_seed[other]), (name, other)
     # Changing step 0 (identity either way, but different RNG use) must not
     # reshuffle step 1's noise.
-    first = [_config("noise", alpha=0.0), _config("noise")]
-    second = [_config("noise", alpha=0.0, type_noise="uniform"), _config("noise")]
+    perlin = _config("noise", type_noise="perlin")
+    first = [_config("noise", alpha=0.0), perlin]
+    second = [_config("noise", alpha=0.0, type_noise="uniform"), perlin]
     assert np.array_equal(_lq(first, 3), _lq(second, 3)), "editing step 0 reshuffled step 1"
+
+
+def test_fractal_noise_contract():
+    from pipeline.process.procedural_noise import fractal_noise
+
+    for name in PROCEDURAL_NOISES:
+        for shape, octaves, frequency in (((48, 40), 1, 0.8), ((48, 40, 3), 3, 0.05),
+                                          ((48, 40, 2), 2, 5.0)):
+            noise = fractal_noise(shape, name, octaves, frequency, 0.4, seed=11)
+            assert noise.shape == shape and noise.dtype == np.float32, (name, shape)
+            assert np.abs(noise).max() <= 1.0 and np.abs(noise).mean() > 0.05, (name, shape)
+            again = fractal_noise(shape, name, octaves, frequency, 0.4, seed=11)
+            assert np.array_equal(noise, again), (name, shape)
+            if len(shape) == 3:
+                assert not np.array_equal(noise[..., 0], noise[..., 1]), (name, shape)
+        # Channels are slices of one 3-D field at heights c * frequency, as in the
+        # destroyer: near copies at low frequencies, unrelated at per-pixel ones
+        for frequency, low, high in ((0.05, 0.8, 1.0), (0.8, -0.3, 0.3)):
+            noise = fractal_noise((96, 96, 3), name, 1, frequency, 0.4, seed=11)
+            r = np.corrcoef(noise[..., 0].ravel(), noise[..., 1].ravel())[0, 1]
+            assert low <= r <= high, (name, frequency, r)
 
 
 # ──────────────────────────────────────────────

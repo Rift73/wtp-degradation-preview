@@ -92,4 +92,4 @@ docs/               # Design notes for the UI
 
 ## License
 
-[MIT](LICENSE) for this project. The vendored `vendor/chainner_ext/` module is the author's C build from chaiNNer-C and contains GPL-3.0 code; see `vendor/PROVENANCE.md` and the licence files next to it.
+[MIT](LICENSE) for this project. The vendored `vendor/chainner_ext/` module is the author's C build from chaiNNer-C and contains GPL-3.0 code; see `vendor/PROVENANCE.md` and the licence files next to it. The simplex generator in `pipeline/process/procedural_noise.py` is a port of chaiNNer's GPL-3.0 numpy implementation (credited in its docstring).
