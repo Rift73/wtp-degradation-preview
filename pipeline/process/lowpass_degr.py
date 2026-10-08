@@ -6,7 +6,7 @@ import logging
 try:
     import torch
     from optimized.gpu_degradations import (
-        lowpass_filter_pt, detail_mask_neo_pt, image_to_tensor, tensor_to_image,
+        lowpass_filter_pt, detail_mask_neo_pt, image_to_tensor, result_image,
     )
 
     _HAS_GPU_LOWPASS = True
@@ -38,29 +38,18 @@ class Lowpass:
         self.detail_mask = lowpass_dict.get("detail_mask", False)
         self.mask_lines_brz = lowpass_dict.get("mask_lines_brz", 0.08)
 
-    def run(self, lq: np.ndarray, hq: np.ndarray) -> tuple:
-        if probability(self.probability):
-            return lq, hq
-
-        if not (_HAS_GPU_LOWPASS and torch.cuda.is_available()):
-            logging.warning("Lowpass requires CUDA — skipping")
-            return lq, hq
-
+    def _degrade(self, tensor: torch.Tensor, hq_tensor: torch.Tensor | None) -> torch.Tensor:
+        """hq_tensor (three channels) is read only when the detail mask is on."""
         cutoff = float(np.random.uniform(*self.cutoff))
         order = int(np.random.randint(self.order[0], self.order[1] + 1))
 
         logging.debug(f"Lowpass - cutoff: {cutoff:.3f} order: {order}")
 
-        tensor = image_to_tensor(lq)
         filtered = lowpass_filter_pt(tensor, cutoff, order)
 
         # Detail mask: protect edges/detail, only lowpass flat areas
         if self.detail_mask:
             # Compute mask from HQ using PyTorch detail_mask_neo
-            hq_tensor = image_to_tensor(hq)
-            if hq.ndim == 2:
-                hq_tensor = hq_tensor.repeat(1, 3, 1, 1)
-
             mask = detail_mask_neo_pt(
                 hq_tensor, lines_brz=self.mask_lines_brz,
             )  # (1, 1, H, W)
@@ -71,4 +60,27 @@ class Lowpass:
                 float((mask > 0).float().mean()) * 100,
             )
 
-        return tensor_to_image(filtered, lq.ndim), hq
+        return filtered
+
+    def run_tensor(self, lq: torch.Tensor, hq: torch.Tensor) -> tuple:
+        """run on 1x3xHxW CUDA tensors (the engine's GPU hand-off)."""
+        if probability(self.probability):
+            return lq, hq
+        return self._degrade(lq, hq), hq
+
+    def run(self, lq: np.ndarray, hq: np.ndarray) -> tuple:
+        if probability(self.probability):
+            return lq, hq
+
+        if not (_HAS_GPU_LOWPASS and torch.cuda.is_available()):
+            logging.warning("Lowpass requires CUDA — skipping")
+            return lq, hq
+
+        tensor = image_to_tensor(lq)
+        hq_tensor = None
+        if self.detail_mask:
+            hq_tensor = image_to_tensor(hq)
+            if hq.ndim == 2:
+                hq_tensor = hq_tensor.repeat(1, 3, 1, 1)
+
+        return result_image(lq, tensor, self._degrade(tensor, hq_tensor)), hq

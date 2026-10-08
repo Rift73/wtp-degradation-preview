@@ -5,7 +5,7 @@ import logging
 
 try:
     import torch
-    from optimized.gpu_degradations import interlace_pt, image_to_tensor, tensor_to_image
+    from optimized.gpu_degradations import interlace_pt, image_to_tensor, result_image
 
     _HAS_GPU = True
 except ImportError:
@@ -28,6 +28,20 @@ class Interlace:
         self.dominant_field = interlace_dict.get("dominant_field", ["top", "bottom"])
         self.probability = interlace_dict.get("probability", 1.0)
 
+    def _degrade(self, tensor: torch.Tensor) -> torch.Tensor:
+        shift = int(np.random.randint(self.field_shift[0], self.field_shift[1] + 1))
+        field = np.random.choice(self.dominant_field)
+
+        logging.debug(f"Interlace - shift: {shift} field: {field}")
+
+        return interlace_pt(tensor, shift, field)
+
+    def run_tensor(self, lq: torch.Tensor, hq: torch.Tensor) -> tuple:
+        """run on 1x3xHxW CUDA tensors (the engine's GPU hand-off)."""
+        if probability(self.probability):
+            return lq, hq
+        return self._degrade(lq), hq
+
     def run(self, lq: np.ndarray, hq: np.ndarray) -> tuple:
         if probability(self.probability):
             return lq, hq
@@ -38,10 +52,5 @@ class Interlace:
             logging.warning("Interlace requires CUDA — skipping")
             return lq, hq
 
-        shift = int(np.random.randint(self.field_shift[0], self.field_shift[1] + 1))
-        field = np.random.choice(self.dominant_field)
-
-        logging.debug(f"Interlace - shift: {shift} field: {field}")
-
-        result = interlace_pt(image_to_tensor(lq), shift, field)
-        return tensor_to_image(result, lq.ndim), hq
+        tensor = image_to_tensor(lq)
+        return result_image(lq, tensor, self._degrade(tensor)), hq

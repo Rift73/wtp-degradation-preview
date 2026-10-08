@@ -6,7 +6,7 @@ import logging
 try:
     import torch
     from optimized.gpu_degradations import (
-        temporal_ghosting_pt, image_to_tensor, tensor_to_image,
+        temporal_ghosting_pt, image_to_tensor, result_image,
     )
 
     _HAS_GPU = True
@@ -32,6 +32,23 @@ class Ghosting:
         self.opacity = ghosting_dict.get("opacity", [0.05, 0.25])
         self.probability = ghosting_dict.get("probability", 1.0)
 
+    def _degrade(self, tensor: torch.Tensor) -> torch.Tensor:
+        sx = int(np.random.randint(self.shift_x[0], self.shift_x[1] + 1))
+        sy = int(np.random.randint(self.shift_y[0], self.shift_y[1] + 1))
+        opacity = float(np.random.uniform(*self.opacity))
+
+        logging.debug(
+            f"Ghosting - shift: ({sx}, {sy}) opacity: {opacity:.2f}"
+        )
+
+        return temporal_ghosting_pt(tensor, sx, sy, opacity)
+
+    def run_tensor(self, lq: torch.Tensor, hq: torch.Tensor) -> tuple:
+        """run on 1x3xHxW CUDA tensors (the engine's GPU hand-off)."""
+        if probability(self.probability):
+            return lq, hq
+        return self._degrade(lq), hq
+
     def run(self, lq: np.ndarray, hq: np.ndarray) -> tuple:
         if probability(self.probability):
             return lq, hq
@@ -42,13 +59,5 @@ class Ghosting:
             logging.warning("Ghosting requires CUDA — skipping")
             return lq, hq
 
-        sx = int(np.random.randint(self.shift_x[0], self.shift_x[1] + 1))
-        sy = int(np.random.randint(self.shift_y[0], self.shift_y[1] + 1))
-        opacity = float(np.random.uniform(*self.opacity))
-
-        logging.debug(
-            f"Ghosting - shift: ({sx}, {sy}) opacity: {opacity:.2f}"
-        )
-
-        result = temporal_ghosting_pt(image_to_tensor(lq), sx, sy, opacity)
-        return tensor_to_image(result, lq.ndim), hq
+        tensor = image_to_tensor(lq)
+        return result_image(lq, tensor, self._degrade(tensor)), hq

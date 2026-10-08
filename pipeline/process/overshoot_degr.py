@@ -5,7 +5,7 @@ import logging
 
 try:
     import torch
-    from optimized.gpu_degradations import overshoot_pt, image_to_tensor, tensor_to_image
+    from optimized.gpu_degradations import overshoot_pt, image_to_tensor, result_image
 
     _HAS_GPU = True
 except ImportError:
@@ -30,14 +30,7 @@ class Overshoot:
         self.order = overshoot_dict.get("order", [1, 3])
         self.probability = overshoot_dict.get("probability", 1.0)
 
-    def run(self, lq: np.ndarray, hq: np.ndarray) -> tuple:
-        if probability(self.probability):
-            return lq, hq
-
-        if not (_HAS_GPU and torch.cuda.is_available()):
-            logging.warning("Overshoot requires CUDA — skipping")
-            return lq, hq
-
+    def _degrade(self, tensor: torch.Tensor) -> torch.Tensor:
         amount = float(np.random.uniform(*self.amount))
         cutoff = float(np.random.uniform(*self.cutoff))
         order = int(np.random.randint(self.order[0], self.order[1] + 1))
@@ -46,5 +39,21 @@ class Overshoot:
             f"Overshoot - amount: {amount:.2f} cutoff: {cutoff:.2f} order: {order}"
         )
 
-        result = overshoot_pt(image_to_tensor(lq), amount, cutoff, order)
-        return tensor_to_image(result, lq.ndim), hq
+        return overshoot_pt(tensor, amount, cutoff, order)
+
+    def run_tensor(self, lq: torch.Tensor, hq: torch.Tensor) -> tuple:
+        """run on 1x3xHxW CUDA tensors (the engine's GPU hand-off)."""
+        if probability(self.probability):
+            return lq, hq
+        return self._degrade(lq), hq
+
+    def run(self, lq: np.ndarray, hq: np.ndarray) -> tuple:
+        if probability(self.probability):
+            return lq, hq
+
+        if not (_HAS_GPU and torch.cuda.is_available()):
+            logging.warning("Overshoot requires CUDA — skipping")
+            return lq, hq
+
+        tensor = image_to_tensor(lq)
+        return result_image(lq, tensor, self._degrade(tensor)), hq

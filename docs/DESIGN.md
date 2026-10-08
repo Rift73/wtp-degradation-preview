@@ -48,8 +48,38 @@ class PipelineEngine(QObject):
     def is_busy(self) -> bool
 def load_image(path) -> np.ndarray | None      # float32 RGB [0,1]; gray->RGB; alpha dropped; 8/16-bit
 def numpy_to_qpixmap(img: np.ndarray) -> QPixmap
-def ffmpeg_available() -> bool; def restore_ffmpeg(cfg: dict) -> bool; def register_ffmpeg(path: str, cfg: dict) -> None
 ```
+**Video backend — `video_backend.py`** (the compress step's video codecs; any thread):
+```python
+@dataclass(frozen=True)
+class Backend: kind: str; path: str | None; version: str; encoders: frozenset   # kind "ffmpeg" | "pyav" | "none"
+def detect() -> Backend                     # cached: located ffmpeg -> PATH ffmpeg -> PyAV (PyAV first when preferred)
+def set_preference(kind: str) -> None       # "ffmpeg" | "pyav"; drops the cache
+def restore_ffmpeg(cfg: dict) -> Backend    # applies cfg["ffmpeg_path"], cfg["video_backend"]
+def register_ffmpeg(path: str, cfg: dict) -> bool   # False (nothing changed) unless path is a working ffmpeg
+def ffmpeg_available() -> bool; def pyav_available() -> bool; def pixel_formats(path, encoder) -> tuple[str, ...]
+```
+The system path runs two ffmpeg processes piped together (raw elementary stream, intra only, `-threads 0`, no
+console window, 30 s timeout); a failure raises with ffmpeg's own stderr. The step cache is cleared when the
+backend changes. An encoder the system ffmpeg lacks runs on PyAV (logged once).
+
+**GPU hand-off — `run_tensor`** (steps; the engine groups them):
+```python
+def run_tensor(self, lq: Tensor, hq: Tensor) -> tuple[Tensor, Tensor]   # optional, on a step class
+```
+- Inputs are 1×3×H×W float32 CUDA tensors in `image_to_tensor`'s layout (a channels-last view of an HWC block);
+  the engine calls it only for RGB lq and hq. It never writes into its inputs and returns tensors on the same device.
+- Returning an input object means "unchanged" (hq usually is). Any other tensor is new; before the next step the
+  engine passes it through `settle_tensor` (clamp to [0, 1] and re-copy into that layout, exactly what a download
+  and an upload give; the layout matters, cuFFT rounds differently on planar input).
+- `run(lq, hq)` must give the same bits: per output, the input array itself where `run_tensor` returns its input,
+  else `tensor_to_image(out, ndim)` (`result_image` does this). Same RNG draws in the same order (the nine GPU
+  steps share one `_degrade`); tested per step and variant.
+- Engine: with CUDA, two or more consecutive steps with `run_tensor` run as a group: one upload at its first step,
+  one download at its last; seeding per step as before. Step times are CUDA-event times on the stream (the first
+  step's includes the upload, the last step's the download). The prefix cache stores outputs at group ends only:
+  an edit inside a group re-runs from the group's start (still bit-identical); a resume can split a group.
+  A failed upload fails that step; a failed download fails the run.
 `schema.py` additions: each param may carry `"help": str`; `CATEGORY_OF: dict[key, str]` (Blur/Filter, Noise/Grain,
 Compression, Color, Pattern, Edge/Sharpen, Geometric, Video signal); `CATEGORY_COLORS` keyed by category name;
 `summarize(schema_key, values) -> str` (≤ 60 chars, e.g. `gauss · σ 1.00`). Config output of `build_config` unchanged
@@ -123,6 +153,15 @@ Measured with the profile harness (median of 3 after warm-up; `docs/perf-before.
 - hf_noise 316 -> 23 ms (Beta sampling on the GPU, seeded). NLMeans CUDA kernel had NEVER compiled (CUDA 13 headers need `/Zc:preprocessor` under MSVC); fixed, builds cached under `%LOCALAPPDATA%\wtp_preview	orch_ext`, second launch 8.5 s -> 0.14 s; without MSVC the fallback is now silent.
 - UI: uint8 conversion moved into the worker; the HQ pixmap is reused when HQ's bytes did not change.
 - Decisions: no pinned-memory downloads (2-4 ms per step for up to 1 GB page-locked RAM); riemersma, codecs and GPU-resident chains left alone.
+
+## Video backend and GPU hand-off (2026-10-09, Lane G2)
+- Owner: system FFmpeg first (located path -> PATH -> PyAV), visible in the header chip, choice in `config.json`
+  (`video_backend`). Codec options match the PyAV path. System vs PyAV at 256² (8-bit levels): 4:4:4 and 4:2:2
+  identical for x264/x265/VP9 and MPEG-2; 4:2:0 differs by about 1 level mean (max 16-24, RGB->4:2:0 conversion
+  of the two builds). The PyAV path has two older faults the system path does not: 4:2:2 at odd heights (+0.7
+  levels mean error, PyAV's decode-side conversion) and MPEG-2 below about 40 px (the PyAV-encoded stream itself
+  is wrong; cause not traced). Left as is (PyAV path unchanged except threads).
+- Consecutive GPU steps hand tensors over on the device (contract above); without CUDA every step runs through `run()` as before.
 
 ### CUDA dithering in the GUI (2026-10-09, kernel shared with the traiNNer fork)
 Exact error-diffusion and riemersma kernels (bit-identical to chainner_ext, 320 + 225 cases on Windows), built on

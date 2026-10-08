@@ -5,7 +5,7 @@ import logging
 
 try:
     import torch
-    from optimized.gpu_degradations import film_grain_pt, image_to_tensor, tensor_to_image
+    from optimized.gpu_degradations import film_grain_pt, image_to_tensor, result_image
 
     _HAS_GPU = True
 except ImportError:
@@ -30,14 +30,7 @@ class FilmGrain:
         self.midtone_bias = filmgrain_dict.get("midtone_bias", [0.5, 1.0])
         self.probability = filmgrain_dict.get("probability", 1.0)
 
-    def run(self, lq: np.ndarray, hq: np.ndarray) -> tuple:
-        if probability(self.probability):
-            return lq, hq
-
-        if not (_HAS_GPU and torch.cuda.is_available()):
-            logging.warning("FilmGrain requires CUDA — skipping")
-            return lq, hq
-
+    def _degrade(self, tensor: torch.Tensor) -> torch.Tensor:
         intensity = float(np.random.uniform(*self.intensity))
         grain_size = float(np.random.uniform(*self.grain_size))
         midtone = float(np.random.uniform(*self.midtone_bias))
@@ -47,11 +40,26 @@ class FilmGrain:
             f"midtone: {midtone:.2f}"
         )
 
+        return film_grain_pt(tensor, intensity, grain_size, midtone)
+
+    def run_tensor(self, lq: torch.Tensor, hq: torch.Tensor) -> tuple:
+        """run on 1x3xHxW CUDA tensors (the engine's GPU hand-off)."""
+        if probability(self.probability):
+            return lq, hq
+        return self._degrade(lq), hq
+
+    def run(self, lq: np.ndarray, hq: np.ndarray) -> tuple:
+        if probability(self.probability):
+            return lq, hq
+
+        if not (_HAS_GPU and torch.cuda.is_available()):
+            logging.warning("FilmGrain requires CUDA — skipping")
+            return lq, hq
+
         # film_grain_pt reads luma from channels 0-2, so grayscale goes in as
         # three equal channels (luma == gray) and channel 0 comes back out.
         tensor = image_to_tensor(lq)
         if lq.ndim == 2:
             tensor = tensor.repeat(1, 3, 1, 1)
 
-        result = film_grain_pt(tensor, intensity, grain_size, midtone)
-        return tensor_to_image(result, lq.ndim), hq
+        return result_image(lq, tensor, self._degrade(tensor)), hq

@@ -2,17 +2,15 @@
 Processing engine for the WTP Degradation Preview GUI.
 
 Runs the degradation pipeline on a worker thread with per-step timing, error
-capture, deterministic per-step seeding and a cache of step outputs (a run
-resumes after the longest unchanged prefix), and holds the image and FFmpeg
-helpers the window needs.
+capture, deterministic per-step seeding, a cache of step outputs (a run
+resumes after the longest unchanged prefix) and GPU-resident hand-off between
+consecutive GPU steps, and holds the image helpers the window needs.
 """
 
 import importlib
 import json
 import logging
-import os
 import random
-import shutil
 import sys
 import time
 import traceback
@@ -22,6 +20,8 @@ import cv2
 import numpy as np
 from PySide6.QtCore import QCoreApplication, QObject, QThread, Signal
 from PySide6.QtGui import QImage, QPixmap
+
+import video_backend
 
 logger = logging.getLogger(__name__)
 
@@ -122,23 +122,26 @@ class _StepCache:
     worker thread.
 
     Each step is reseeded right before it runs, so step i's output depends
-    only on the source, configs[:i + 1] and the seed: an entry is keyed by the
-    seed and the canonical JSON of that prefix, and a different source array
-    object clears the cache (callers pass a new array for a new image and
-    never modify one in place). Steps may write into their inputs (halo does),
-    so no step ever receives a cached array.
+    only on the source, configs[:i + 1], the seed and the video backend: an
+    entry is keyed by the seed and the canonical JSON of that prefix, and a
+    different source array object or video backend clears the cache (callers
+    pass a new array for a new image and never modify one in place). Steps
+    may write into their inputs (halo does), so no step ever receives a
+    cached array. A GPU group stores only its last step's output.
     """
 
     def __init__(self):
         self.source = None
+        self.backend = None
         self.entries = {}  # (seed, tuple of config JSON up to the step) -> _CacheEntry
         self.run_id = 0
 
-    def begin(self, source, configs, seed):
+    def begin(self, source, backend, configs, seed):
         """Start a run. Returns the per-step keys of the request, the number of
         leading steps it can skip, and the entry to resume from (or None)."""
-        if source is not self.source:
+        if source is not self.source or backend != self.backend:
             self.source = source
+            self.backend = backend
             self.entries.clear()
         self.run_id += 1
         texts = [json.dumps(config, sort_keys=True) for config in configs]
@@ -192,13 +195,117 @@ class _StepCache:
                     total -= holder[0]
 
 
+def _run_step(config, index, lq, hq, seed, get_class, failed_modules):
+    """Run one step through its numpy run(). Returns (lq, hq, [StepResult])."""
+    type_key = config["type"]
+    t0 = time.perf_counter()
+    error = summary = None
+    cls = get_class(type_key)
+    if cls is None:
+        error, summary = _unavailable(type_key, failed_modules)
+    else:
+        _seed_step(seed, index)
+        try:
+            result = cls(config).run(lq, hq)
+        except Exception as exc:
+            error = traceback.format_exc()
+            summary = _exception_summary(exc)
+        else:
+            if result is not None:
+                lq, hq = result
+    elapsed_ms = (time.perf_counter() - t0) * 1000.0
+    return lq, hq, [StepResult(index, type_key, elapsed_ms, error, summary)]
+
+
+def _gpu_handoff():
+    """optimized.gpu_degradations when steps can hand tensors over on a CUDA
+    device, else None."""
+    torch = sys.modules.get("torch")
+    if torch is None or not torch.cuda.is_available():
+        return None
+    try:
+        from optimized import gpu_degradations
+    except ImportError:
+        return None
+    return gpu_degradations
+
+
+def _is_rgb(img):
+    return img.ndim == 3 and img.shape[2] == 3
+
+
+def _group_end(configs, index, lq, hq, gpu, get_class):
+    """End (exclusive) of the run of steps from index whose classes define
+    run_tensor, when the GPU hand-off applies; else index + 1."""
+    end = index
+    if gpu is not None and _is_rgb(lq) and _is_rgb(hq):
+        while end < len(configs) and hasattr(get_class(configs[end]["type"]), "run_tensor"):
+            end += 1
+    return max(end, index + 1)
+
+
+def _run_group(gpu, configs, start, end, lq, hq, seed, get_class):
+    """Run configs[start:end] through run_tensor with lq and hq on the GPU:
+    uploaded at the first step, downloaded at the last. Between steps a new
+    output is settled exactly as a download and an upload would leave it, so
+    the result is bit-identical to running each step's run() in turn.
+
+    Step times come from CUDA events on the stream: the first step's includes
+    the upload, the last step's the download. A failed upload fails the step
+    (the next one tries again); a failed download fails the run.
+    Returns (lq, hq, [StepResult]).
+    """
+    torch = sys.modules["torch"]
+    events = [torch.cuda.Event(enable_timing=True) for _ in range(end - start + 1)]
+    events[0].record()
+    lq_up = hq_up = lq_t = hq_t = None
+    outcomes = []  # (error, summary) per step
+    for index in range(start, end):
+        config = configs[index]
+        error = summary = None
+        _seed_step(seed, index)
+        try:
+            if lq_up is None:
+                lq_t = gpu.image_to_tensor(lq)
+                hq_t = lq_t if hq is lq else gpu.image_to_tensor(hq)
+                lq_up, hq_up = lq_t, hq_t
+            lq_out, hq_out = get_class(config["type"])(config).run_tensor(lq_t, hq_t)
+            if index < end - 1:  # the last step's outputs are downloaded instead
+                # An input returned as is is unchanged; anything else is new
+                if lq_out is not lq_t:
+                    lq_out = gpu.settle_tensor(lq_out)
+                if hq_out is not hq_t:
+                    hq_out = gpu.settle_tensor(hq_out)
+        except Exception as exc:
+            error = traceback.format_exc()
+            summary = _exception_summary(exc)
+        else:
+            lq_t, hq_t = lq_out, hq_out
+        outcomes.append((error, summary))
+        if index < end - 1:
+            events[index - start + 1].record()
+    if lq_up is None:  # nothing was uploaded, so every step failed
+        lq_new, hq_new = lq, hq
+    else:
+        lq_new = lq if lq_t is lq_up else gpu.tensor_to_image(lq_t, 3)
+        hq_new = hq if hq_t is hq_up else gpu.tensor_to_image(hq_t, 3)
+    events[-1].record()
+    events[-1].synchronize()
+    steps = [
+        StepResult(index, configs[index]["type"],
+                   events[pos].elapsed_time(events[pos + 1]), error, summary)
+        for pos, (index, (error, summary)) in enumerate(zip(range(start, end), outcomes))
+    ]
+    return lq_new, hq_new, steps
+
+
 def _run_pipeline(cache, source, configs, seed):
     _ensure_pipeline()
     from pipeline.process import FAILED_MODULES
     from pipeline.utils.registry import get_class
 
     t_run = time.perf_counter()
-    keys, start, entry = cache.begin(source, configs, seed)
+    keys, start, entry = cache.begin(source, video_backend.detect(), configs, seed)
     steps = [StepResult(i, configs[i]["type"], 0.0, None, None, cached=True) for i in range(start)]
     if entry is None:
         lq = source.copy()
@@ -214,37 +321,29 @@ def _run_pipeline(cache, source, configs, seed):
     # entries share it while no step replaces HQ (steps write into lq, never
     # into an hq they return unchanged, unless hq is also their lq).
     # Only successful steps are cached. After a failed step nothing more is:
-    # the later steps' outputs depend on the failure.
+    # the later steps' outputs depend on the failure. Consecutive GPU steps
+    # run as one group, cached at its end only.
     caching = True
-    for index in range(start, len(configs)):
-        config = configs[index]
-        type_key = config["type"]
+    gpu = _gpu_handoff()
+    index = start
+    while index < len(configs):
         hq_in, hq_shape, shared_in = hq, hq.shape, lq is hq
-        t0 = time.perf_counter()
-        error = summary = None
-        cls = get_class(type_key)
-        if cls is None:
-            error, summary = _unavailable(type_key, FAILED_MODULES)
+        end = _group_end(configs, index, lq, hq, gpu, get_class)
+        if end - index > 1:
+            lq, hq, done = _run_group(gpu, configs, index, end, lq, hq, seed, get_class)
         else:
-            _seed_step(seed, index)
-            try:
-                result = cls(config).run(lq, hq)
-            except Exception as exc:
-                error = traceback.format_exc()
-                summary = _exception_summary(exc)
-            else:
-                if result is not None:
-                    lq, hq = result
-        elapsed_ms = (time.perf_counter() - t0) * 1000.0
-        steps.append(StepResult(index, type_key, elapsed_ms, error, summary))
+            lq, hq, done = _run_step(configs[index], index, lq, hq, seed, get_class,
+                                     FAILED_MODULES)
+        steps.extend(done)
         replaced = hq is not hq_in or hq.shape != hq_shape
         hq_changed = hq_changed or replaced
         if replaced or shared_in:  # a write into lq may have reached hq
             hq_copy = None
-        if error is not None:
+        if any(step.error is not None for step in done):
             caching = False
         elif caching:
-            hq_copy = cache.store(keys[index], index, lq, hq, hq_copy, hq_changed)
+            hq_copy = cache.store(keys[end - 1], end - 1, lq, hq, hq_copy, hq_changed)
+        index = end
     lq_u8 = _to_uint8(lq)
     hq_u8 = _to_uint8(hq) if hq_changed else None
     total_ms = (time.perf_counter() - t_run) * 1000.0
@@ -405,42 +504,3 @@ def numpy_to_qpixmap(img):
     else:
         qimg = QImage(img.data, w, h, w * 3, QImage.Format.Format_RGB888)
     return QPixmap.fromImage(qimg.copy())
-
-
-# ──────────────────────────────────────────────
-# FFmpeg discovery
-# ──────────────────────────────────────────────
-
-_dll_dirs = {}  # directory -> handle from os.add_dll_directory (kept alive)
-
-
-def ffmpeg_available():
-    """True if an ffmpeg executable is reachable through PATH."""
-    return shutil.which("ffmpeg") is not None
-
-
-def _use_ffmpeg_dir(ffdir):
-    """Put ffdir on PATH (ffmpeg CLI) and on the DLL search path, so
-    torchcodec can resolve a shared FFmpeg build's libav* DLLs."""
-    if ffdir not in os.environ.get("PATH", "").split(os.pathsep):
-        os.environ["PATH"] = ffdir + os.pathsep + os.environ.get("PATH", "")
-    if sys.platform == "win32" and ffdir not in _dll_dirs:
-        _dll_dirs[ffdir] = os.add_dll_directory(ffdir)
-
-
-def restore_ffmpeg(cfg):
-    """Make FFmpeg usable from cfg["ffmpeg_path"], or else from the ffmpeg
-    already on PATH. Call before the first run so the DLL directory is
-    registered before the pipeline imports torchcodec. Returns availability."""
-    path = cfg.get("ffmpeg_path", "")
-    if not (path and os.path.isfile(path)):
-        path = shutil.which("ffmpeg")
-    if path:
-        _use_ffmpeg_dir(os.path.dirname(os.path.abspath(path)))
-    return ffmpeg_available()
-
-
-def register_ffmpeg(path, cfg):
-    """Remember a user-selected ffmpeg executable in cfg and put it to use."""
-    cfg["ffmpeg_path"] = path
-    _use_ffmpeg_dir(os.path.dirname(os.path.abspath(path)))

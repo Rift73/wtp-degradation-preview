@@ -6,7 +6,7 @@ import logging
 try:
     import torch
     from optimized.gpu_degradations import (
-        ntsc_composite_pt, image_to_tensor, tensor_to_image,
+        ntsc_composite_pt, image_to_tensor, result_image,
     )
 
     _HAS_GPU_NTSC = True
@@ -67,16 +67,7 @@ class NTSCComposite:
         self.tape_trailing = config.get("tape_trailing", [0.0, 0.0])
         self.intensity = config.get("intensity", [1.0, 1.0])
 
-    def run(self, lq: np.ndarray, hq: np.ndarray) -> tuple:
-        if probability(self.probability):
-            return lq, hq
-        if lq.ndim == 2:
-            return lq, hq
-
-        if not (_HAS_GPU_NTSC and torch.cuda.is_available()):
-            logging.warning("NTSC requires CUDA — skipping")
-            return lq, hq
-
+    def _degrade(self, tensor: torch.Tensor) -> torch.Tensor:
         # Sample parameters
         noise_val = float(np.random.uniform(*self.noise))
         luma_noise_val = float(np.random.uniform(*self.luma_noise))
@@ -97,8 +88,8 @@ class NTSCComposite:
             ringing_val, vlbw_val, trail_val,
         )
 
-        result = ntsc_composite_pt(
-            image_to_tensor(lq),
+        return ntsc_composite_pt(
+            tensor,
             noise=noise_val,
             luma_noise=luma_noise_val,
             ghost_amplitude=ghost_amp,
@@ -113,4 +104,22 @@ class NTSCComposite:
             comb_mode=self.comb_mode,
             enable_vhs=self.enable_vhs,
         )
-        return tensor_to_image(result, lq.ndim), hq
+
+    def run_tensor(self, lq: torch.Tensor, hq: torch.Tensor) -> tuple:
+        """run on 1x3xHxW CUDA tensors (the engine's GPU hand-off)."""
+        if probability(self.probability):
+            return lq, hq
+        return self._degrade(lq), hq
+
+    def run(self, lq: np.ndarray, hq: np.ndarray) -> tuple:
+        if probability(self.probability):
+            return lq, hq
+        if lq.ndim == 2:
+            return lq, hq
+
+        if not (_HAS_GPU_NTSC and torch.cuda.is_available()):
+            logging.warning("NTSC requires CUDA — skipping")
+            return lq, hq
+
+        tensor = image_to_tensor(lq)
+        return result_image(lq, tensor, self._degrade(tensor)), hq

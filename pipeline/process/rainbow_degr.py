@@ -6,7 +6,7 @@ import logging
 try:
     import torch
     from optimized.gpu_degradations import (
-        composite_rainbow_pt, image_to_tensor, tensor_to_image,
+        composite_rainbow_pt, image_to_tensor, result_image,
     )
 
     _HAS_GPU_RAINBOW = True
@@ -38,16 +38,7 @@ class Rainbow:
         self.phase_alternation = rainbow_dict.get("phase_alternation", True)
         self.probability = rainbow_dict.get("probability", 1.0)
 
-    def run(self, lq: np.ndarray, hq: np.ndarray) -> tuple:
-        if probability(self.probability):
-            return lq, hq
-        if lq.ndim == 2:
-            return lq, hq
-
-        if not (_HAS_GPU_RAINBOW and torch.cuda.is_available()):
-            logging.warning("Rainbow requires CUDA — skipping")
-            return lq, hq
-
+    def _degrade(self, tensor: torch.Tensor) -> torch.Tensor:
         freq = float(np.random.uniform(*self.subcarrier_freq))
         bw = float(np.random.uniform(*self.chroma_bandwidth))
         intensity = float(np.random.uniform(*self.intensity))
@@ -58,8 +49,26 @@ class Rainbow:
             f"intensity: {intensity:.2f} phase: {phase_offset:.2f}"
         )
 
-        result = composite_rainbow_pt(
-            image_to_tensor(lq), freq, bw, intensity,
+        return composite_rainbow_pt(
+            tensor, freq, bw, intensity,
             self.phase_alternation, phase_offset,
         )
-        return tensor_to_image(result, lq.ndim), hq
+
+    def run_tensor(self, lq: torch.Tensor, hq: torch.Tensor) -> tuple:
+        """run on 1x3xHxW CUDA tensors (the engine's GPU hand-off)."""
+        if probability(self.probability):
+            return lq, hq
+        return self._degrade(lq), hq
+
+    def run(self, lq: np.ndarray, hq: np.ndarray) -> tuple:
+        if probability(self.probability):
+            return lq, hq
+        if lq.ndim == 2:
+            return lq, hq
+
+        if not (_HAS_GPU_RAINBOW and torch.cuda.is_available()):
+            logging.warning("Rainbow requires CUDA — skipping")
+            return lq, hq
+
+        tensor = image_to_tensor(lq)
+        return result_image(lq, tensor, self._degrade(tensor)), hq

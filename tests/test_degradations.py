@@ -34,7 +34,7 @@ from schema import (
     build_config, summarize,
 )
 
-# The video codecs (h264, hevc, mpeg2, mpeg4, vp9) run through PyAV
+# The video codecs (h264, hevc, mpeg2, mpeg4, vp9) run through the system ffmpeg or PyAV
 HAS_AV = importlib.util.find_spec("av") is not None
 
 VIDEO_CODECS = {"h264", "hevc", "mpeg2", "mpeg4", "vp9"}
@@ -621,6 +621,223 @@ def test_cuda_ext_skips_build_without_compiler():
             os.makedirs(build_dir)
             open(module_path, "wb").close()
             cuda_ext.check_buildable(name, sources, flags, "the fallback")  # cached: no compiler needed
+
+
+# ──────────────────────────────────────────────
+# (h) video backend: located ffmpeg, then PATH, then PyAV
+# ──────────────────────────────────────────────
+
+def test_video_backend_detect():
+    import video_backend
+
+    try:
+        backend = video_backend.restore_ffmpeg({})
+        system = shutil.which("ffmpeg")
+        if system is not None:
+            assert backend.kind == "ffmpeg" and os.path.samefile(backend.path, system), backend
+            assert backend.version and "mpeg4" in backend.encoders, backend
+            assert video_backend.detect() is backend, "detect() must be cached"
+            assert video_backend.pixel_formats(backend.path, "mpeg4") == ("yuv420p",)
+        if HAS_AV:
+            video_backend.set_preference("pyav")
+            assert video_backend.detect().kind == "pyav"
+            if system is not None:
+                video_backend.set_preference("ffmpeg")
+                assert video_backend.detect().kind == "ffmpeg"
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = os.path.join(tmp, "ffmpeg.exe")
+            with open(fake, "wb") as f:
+                f.write(b"not a program")
+            cfg = {}
+            before = video_backend.detect()
+            assert not video_backend.register_ffmpeg(fake, cfg) and cfg == {}
+            assert video_backend.detect() == before
+            # A saved path that no longer works falls back to PATH / PyAV
+            assert video_backend.restore_ffmpeg({"ffmpeg_path": fake}) == video_backend.restore_ffmpeg({})
+        try:
+            video_backend.set_preference("gstreamer")
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("an unknown backend must raise ValueError")
+    finally:
+        video_backend.restore_ffmpeg({})
+
+
+def test_compress_system_ffmpeg_matches_pyav():
+    import video_backend
+    from pipeline.utils.registry import get_class
+
+    if shutil.which("ffmpeg") is None or not HAS_AV:
+        print("  SKIP: needs an ffmpeg on PATH and PyAV")
+        return
+    engine._ensure_pipeline()
+    img = _image(130)[:129, :127]  # odd: padded for 4:2:0, cropped back
+    try:
+        for alg in sorted(VIDEO_CODECS):
+            cfg = _config("compress", algorithm=alg, video_sampling="420",
+                          quality=CODEC_QUALITY_PROFILES[alg]["default"])
+            out = {}
+            for kind in ("ffmpeg", "pyav"):
+                video_backend.set_preference(kind)
+                assert video_backend.detect().kind == kind
+                np.random.seed(1)
+                out[kind] = get_class("compress")(cfg).run(img.copy(), img.copy())[0]
+                assert out[kind].shape == img.shape and out[kind].dtype == np.float32, (alg, kind)
+                assert np.abs(out[kind] - img).mean() * 255 < 12, (alg, kind, "not a roundtrip")
+            # Builds differ in their RGB -> 4:2:0 conversion: about one level on average
+            diff = np.abs(out["ffmpeg"] - out["pyav"]).mean() * 255
+            assert diff < 3, (alg, diff)
+    finally:
+        video_backend.restore_ffmpeg({})
+
+
+def test_ffmpeg_error_reaches_the_step():
+    import video_backend
+    from pipeline.process import compress_degr
+
+    path = shutil.which("ffmpeg")
+    if path is None:
+        print("  SKIP: no ffmpeg on PATH")
+        return
+    encode = [path, "-hide_banner", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgb24",
+              "-s", "4x4", "-i", "pipe:", "-c:v", "no_such_encoder", "-f", "h264", "pipe:"]
+    decode = [path, "-hide_banner", "-loglevel", "error", "-f", "h264", "-i", "pipe:",
+              "-f", "rawvideo", "pipe:"]
+    try:
+        compress_degr._encode_decode(encode, decode, bytes(48), "no_such_encoder")
+    except RuntimeError as exc:
+        first = str(exc).splitlines()[0]
+        assert first.startswith("ffmpeg no_such_encoder encode failed (exit "), first
+        assert "no_such_encoder" in first.split("):", 1)[1], first  # ffmpeg's own words
+    else:
+        raise AssertionError("an unknown encoder must raise")
+    assert video_backend.POPEN_FLAGS == (subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0)
+
+
+# ──────────────────────────────────────────────
+# (i) GPU-resident hand-off between consecutive GPU steps
+# ──────────────────────────────────────────────
+
+GPU_STEPS = ("banding", "filmgrain", "ghosting", "interlace", "lowpass", "ntsc", "overshoot",
+             "rainbow", "scanline")
+
+
+def _same_bits(a, b):
+    return a.shape == b.shape and a.dtype == b.dtype == np.float32 and \
+        np.array_equal(a.view(np.uint32), b.view(np.uint32))
+
+
+def test_run_tensor_matches_run():
+    if _torch_cuda() is None:
+        print("  SKIP: no CUDA device")
+        return
+    from optimized.gpu_degradations import image_to_tensor, result_image
+    from pipeline.utils.registry import get_class
+
+    hq = _image(64)
+    # In range, and beyond [0, 1] (an output a step leaves unchanged is not clamped)
+    sources = (hq * 0.8 + 0.1, hq * 1.2 - 0.1)
+    problems = []
+    for key in GPU_STEPS:
+        cls = get_class(key)
+        variants = [_defaults(key)] + [v for k, _, v in _variant_cases() if k == key]
+        for values in variants:
+            cfg = build_config(key, values)
+            for lq in sources:
+                for seed in (1, 2):
+                    engine._seed_step(seed, 0)
+                    lq_a, hq_a = cls(cfg).run(lq.copy(), hq.copy())
+                    engine._seed_step(seed, 0)
+                    lq_in, hq_in = lq.copy(), hq.copy()
+                    lq_t, hq_t = image_to_tensor(lq_in), image_to_tensor(hq_in)
+                    lq_out, hq_out = cls(cfg).run_tensor(lq_t, hq_t)
+                    if hq_out is not hq_t or lq_out.device != lq_t.device:
+                        problems.append(f"{key} {values}: hq replaced or device changed")
+                    lq_b = result_image(lq_in, lq_t, lq_out)
+                    if not (_same_bits(lq_a, lq_b) and _same_bits(hq_a, hq)):
+                        problems.append(f"{key} {values} seed {seed} range "
+                                        f"{lq.min():.1f}..{lq.max():.1f}")
+    assert not problems, "\n".join(problems)
+
+
+def _one_by_one(source, configs, seed):
+    """lq and hq from running each step's run() in turn, seeded as the engine seeds."""
+    from pipeline.utils.registry import get_class
+
+    lq, hq = source.copy(), source.copy()
+    for index, config in enumerate(configs):
+        engine._seed_step(seed, index)
+        lq, hq = get_class(config["type"])(config).run(lq, hq)
+    return lq, hq
+
+
+def _cached_depths(eng):
+    return sorted(entry.depth for entry in eng._thread.cache.entries.values())
+
+
+def _gpu_chain():
+    # CPU, three GPU steps (one group), CPU. Overshoot feeds lowpass: FFT on
+    # FFT output, where a hand-off that skipped the layout copy changes bits
+    return [_config("blur"), _config("overshoot"), _config("lowpass"), _config("filmgrain"),
+            _config("saturation")]
+
+
+def test_engine_gpu_group_matches_steps():
+    if _torch_cuda() is None:
+        print("  SKIP: no CUDA device")
+        return
+    img = _image()
+    cases = (
+        (img, _gpu_chain(), [0, 3, 4]),
+        # Beyond [0, 1], led by a step that leaves lq unchanged: the group must
+        # pass the unclamped upload on, as run() does
+        (img * 1.2 - 0.1, [_config("scanline", strength=0.0)] + _gpu_chain()[1:4], [3]),
+    )
+    for source, configs, depths in cases:
+        eng = engine.PipelineEngine()
+        run = _run_once(eng, source, configs, 6)
+        assert all(s.error is None for s in run.steps), run.steps
+        lq, hq = _one_by_one(source, configs, 6)
+        assert _same_bits(run.lq, lq) and _same_bits(run.hq, hq), configs
+        assert _cached_depths(eng) == depths, "a group is cached at its end only"
+        assert [s.index for s in run.steps] == list(range(len(configs)))
+        assert all(s.elapsed_ms > 0 for s in run.steps), [s.elapsed_ms for s in run.steps]
+        assert not run.hq_changed and run.hq_u8 is None
+
+
+def test_engine_gpu_group_resume_matches_cold_run():
+    if _torch_cuda() is None:
+        print("  SKIP: no CUDA device")
+        return
+    img = _image()
+    head = [_config("overshoot"), _config("filmgrain")]
+    tail = [_config("scanline"), _config("banding")]
+    eng = engine.PipelineEngine()
+    _run_once(eng, img, head, 9)
+    assert _cached_depths(eng) == [1]
+    # Resumes after the old group's end; the rest runs as a new group, while
+    # the cold run takes all four steps as one group
+    resumed = _run_once(eng, img, head + tail, 9)
+    cold = _run_once(engine.PipelineEngine(), img, head + tail, 9)
+    assert (resumed.cached_steps, cold.cached_steps) == (2, 0)
+    assert _same_bits(resumed.lq, cold.lq) and _same_bits(resumed.hq, cold.hq)
+    # An edit inside a group re-runs from the group's start
+    eng = engine.PipelineEngine()
+    _run_once(eng, img, head + tail, 9)
+    assert _cached_depths(eng) == [3]
+    edited = head + [_config("scanline", strength=0.9), tail[1]]
+    rerun = _run_once(eng, img, edited, 9)
+    assert rerun.cached_steps == 0
+    assert _same_bits(rerun.lq, _run_once(engine.PipelineEngine(), img, edited, 9).lq)
+    # An edit after a group resumes at the group's end
+    eng = engine.PipelineEngine()
+    chain = _gpu_chain()
+    _run_once(eng, img, chain, 9)
+    later = chain[:4] + [_config("saturation", rand=1.5)]
+    resumed = _run_once(eng, img, later, 9)
+    assert resumed.cached_steps == 4
+    assert _same_bits(resumed.lq, _one_by_one(img, later, 9)[0])
 
 
 # ──────────────────────────────────────────────

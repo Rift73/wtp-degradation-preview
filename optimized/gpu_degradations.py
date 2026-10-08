@@ -5,6 +5,7 @@ All functions take/return BCHW float32 tensors on GPU.
 
 Functions:
 - image_to_tensor / tensor_to_image: numpy HWC image <-> 1CHW tensor hand-off
+- settle_tensor / result_image: the run_tensor protocol (GPU-resident steps)
 - rgb_to_ycbcr_pt / ycbcr_to_rgb_pt: Color space conversion (BT.601/709/2020/240M)
 - rgb_to_cmyk_pt / cmyk_to_rgb_pt: CMYK conversion
 - channel_shift_pt: Per-channel spatial shift (RGB/YUV/CMYK)
@@ -66,6 +67,24 @@ def tensor_to_image(tensor: Tensor, ndim: int) -> np.ndarray:
     """
     tensor = tensor[0, 0] if ndim == 2 else tensor[0].permute(1, 2, 0)
     return tensor.clamp(0, 1).contiguous().cpu().numpy()
+
+
+def settle_tensor(tensor: Tensor) -> Tensor:
+    """What ``image_to_tensor(tensor_to_image(tensor, 3))`` returns, without
+    leaving the device: clamped to [0, 1], in image_to_tensor's layout.
+
+    The engine passes a step's new output through this before the next step's
+    ``run_tensor``, so a chain on the device sees the bits a chain of ``run``
+    calls would.
+    """
+    return tensor[0].permute(1, 2, 0).clamp(0, 1).contiguous().permute(2, 0, 1).unsqueeze(0)
+
+
+def result_image(image: np.ndarray, tensor: Tensor, result: Tensor) -> np.ndarray:
+    """What a step's ``run`` returns for one output of its tensor work: ``image``
+    itself when ``result`` is the tensor uploaded from it (the step left it
+    unchanged), else ``result`` downloaded with ``image.ndim``."""
+    return image if result is tensor else tensor_to_image(result, image.ndim)
 
 
 # ═══════════════════════════════════════════════════════════════

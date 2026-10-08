@@ -5,7 +5,7 @@ import logging
 
 try:
     import torch
-    from optimized.gpu_degradations import scanline_pt, image_to_tensor, tensor_to_image
+    from optimized.gpu_degradations import scanline_pt, image_to_tensor, result_image
 
     _HAS_GPU = True
 except ImportError:
@@ -28,6 +28,21 @@ class Scanline:
         self.even_lines = scanline_dict.get("even_lines", True)
         self.probability = scanline_dict.get("probability", 1.0)
 
+    def _degrade(self, tensor: torch.Tensor) -> torch.Tensor:
+        strength = float(np.random.uniform(*self.strength))
+
+        logging.debug(
+            f"Scanline - strength: {strength:.2f} even: {self.even_lines}"
+        )
+
+        return scanline_pt(tensor, strength, self.even_lines)
+
+    def run_tensor(self, lq: torch.Tensor, hq: torch.Tensor) -> tuple:
+        """run on 1x3xHxW CUDA tensors (the engine's GPU hand-off)."""
+        if probability(self.probability):
+            return lq, hq
+        return self._degrade(lq), hq
+
     def run(self, lq: np.ndarray, hq: np.ndarray) -> tuple:
         if probability(self.probability):
             return lq, hq
@@ -36,11 +51,5 @@ class Scanline:
             logging.warning("Scanline requires CUDA — skipping")
             return lq, hq
 
-        strength = float(np.random.uniform(*self.strength))
-
-        logging.debug(
-            f"Scanline - strength: {strength:.2f} even: {self.even_lines}"
-        )
-
-        result = scanline_pt(image_to_tensor(lq), strength, self.even_lines)
-        return tensor_to_image(result, lq.ndim), hq
+        tensor = image_to_tensor(lq)
+        return result_image(lq, tensor, self._degrade(tensor)), hq
