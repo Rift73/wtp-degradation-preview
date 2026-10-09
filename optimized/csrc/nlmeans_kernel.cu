@@ -3,6 +3,7 @@
  */
 
 #include <torch/extension.h>
+#include <ATen/cuda/CUDAContext.h>
 #include <cuda.h>
 #include <cuda_runtime.h>
 
@@ -185,7 +186,7 @@ torch::Tensor nlmeans_cuda(
     const int rowfilt_size = d_h * BLOCK_X;
     const int smem_bytes = (channels * tile_size + d_size + rowfilt_size) * sizeof(float);
 
-    nlmeans_kernel<<<grid, block, smem_bytes>>>(
+    nlmeans_kernel<<<grid, block, smem_bytes, at::cuda::getCurrentCUDAStream()>>>(
         input.data_ptr<float>(),
         output.data_ptr<float>(),
         batch_size,

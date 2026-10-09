@@ -201,3 +201,28 @@ Two process spawns and the pipe cost ~70 ms per run, so PyAV is the default back
 one-click option in the chip (persisted). GPU hand-off: the nine GPU steps alone 56.6 → 26.3 ms at 1024² and
 180 → 74 ms at 2048² (bit-identical); the mixed 24-step default chain is unchanged within noise (its CPU steps
 dominate and it has few consecutive GPU runs); a warm edit of a late step costs 5.5 ms at 1024², 17.6 ms at 2048².
+
+### Ported from the traiNNer OTF pass (2026-10-09)
+The traiNNer fork's OTF performance pass (its `docs/OTF_performance.md`) was checked item by item against the GUI.
+Most of it does not apply here: DiffJPEG and the Poisson noise are traiNNer's, the GUI resizes on the CPU and leaves
+`cudnn.benchmark` off, the GUI seeds its own RNG, and one image per codec call keeps the automatic thread counts.
+Ported:
+- Kernel sources: `optimized/csrc/dither.cpp` and `dither_kernel.cu` are byte-identical with `traiNNer/csrc/` again
+  (they now carry traiNNer's palette entry points, unused here: the GUI has no palette mode); the IIR and NLMeans
+  kernels launch on torch's current stream (`at::cuda::getCurrentCUDAStream()`). The GUI's NLMeans kernel keeps its
+  interior fast path, which traiNNer's copy lacks. Rebuilt and re-verified with the existing tests: NLMeans within
+  1e-5 of the PyTorch fallback, dithering bit-identical to chainner_ext.
+- NTSC filter cache (`_ntsc_fir_power_response`): the |H|² cache was keyed on `round(kernel.sum() * 1e8)`, and every
+  design sums to 1, so filters with the same tap count and FFT size shared one entry whenever their float32 sums
+  rounded alike (and each lookup was a host sync). It is keyed on cutoff, taps, Nyquist and FFT size now. Against
+  HEAD (`torch.equal`): the broadcast preset is identical at 256² and 480×754 and differs above 754×480, where one
+  filter served Y, I and Q (max |d| 0.63-0.69 at 720×1280, 0.48-0.57 at 1080×1920); every VHS output differs
+  (max |d| 0.32-0.46), and the VHS luma and colour-under bandwidths now take effect. Preview and training agree
+  again, since traiNNer carries the same fix.
+- Device constants cached (NTSC matrices and carriers, VHS carriers, Bayer threshold map, Prewitt kernels), outputs
+  bit-identical. Host syncs per call at 2048²: NTSC broadcast 9 → 0 (23.0 → 21.0 ms), NTSC VHS 12 → 0
+  (28.8 → 25.8 ms), ordered dither 1 → 0 (0.61 → 0.16 ms), detail mask 2 → 0 (10.7 → 9.7 ms); every other GPU step
+  already ran sync-free. Tests: `test_gpu_steps_sync_free`, `test_ntsc_filters_keyed_on_design`.
+- Checked, nothing to do: grayscale and 4-channel files never reach the steps (`engine.load_image` returns RGB);
+  mpeg4 already used a fixed quantizer (traiNNer's crf bug was not here). Not ported: palette-mode dithering (a
+  traiNNer-only feature) and side-stream pipelining (not shipped there either).

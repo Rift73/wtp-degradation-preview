@@ -1069,6 +1069,79 @@ def test_engine_new_source_frees_device_cache():
 
 
 # ──────────────────────────────────────────────
+# (k) GPU steps ported from the traiNNer OTF pass: no host syncs, NTSC filters keyed on design
+# ──────────────────────────────────────────────
+
+def _sync_count(torch, fn):
+    """Host syncs raised by fn after a warm-up call (caches filled, kernels built)."""
+    fn()
+    torch.cuda.synchronize()
+    torch.cuda.set_sync_debug_mode("warn")
+    try:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            fn()
+            torch.cuda.synchronize()
+    finally:
+        torch.cuda.set_sync_debug_mode("default")
+    return sum(1 for w in caught if "synchroniz" in str(w.message))
+
+
+def test_gpu_steps_sync_free():
+    torch = _torch_cuda()
+    if torch is None:
+        print("  SKIP: no CUDA device")
+        return
+    from optimized import gpu_degradations as g
+
+    x = g.image_to_tensor(_image(160))
+    cases = {
+        "ntsc broadcast": lambda: g.ntsc_composite_pt(x),
+        "ntsc vhs, every effect": lambda: g.ntsc_composite_pt(
+            x, luma_noise=0.05, ghost_amplitude=0.2, jitter=0.5, edge_ringing=1.0, vhs_luma_bw=3.0,
+            color_under_bw=400.0, tape_trailing=0.3, intensity=0.9, comb_mode="1h", enable_vhs=True),
+        "ordered dither": lambda: g.ordered_dither_pt(x, 8, 8),
+        "detail mask": lambda: g.detail_mask_neo_pt(x),
+    }
+    syncs = {name: _sync_count(torch, fn) for name, fn in cases.items()}
+    assert all(n == 0 for n in syncs.values()), syncs
+
+
+def test_ntsc_filters_keyed_on_design():
+    torch = _torch_cuda()
+    if torch is None:
+        print("  SKIP: no CUDA device")
+        return
+    from optimized import gpu_degradations as g
+
+    # Same tap count and FFT size, different cutoff: separate responses, each the
+    # zero-phase filter of its own design (the cache used to be keyed on the kernel
+    # sum, which is 1 for every design, so such filters could share one entry)
+    signal = torch.rand(1, 1, 8, 300, device="cuda", generator=torch.Generator("cuda").manual_seed(1))
+    padded = torch.nn.functional.pad(signal, [101, 101, 0, 0], mode="reflect")  # 502 wide -> 512-point FFT
+    outputs = []
+    for cutoff in (0.5e6, 4.2e6):
+        kernel = g._ntsc_design_fir(cutoff, 101, signal.device, g._NTSC_NYQUIST)
+        response = torch.fft.rfft(kernel, n=512)
+        power = response.real * response.real + response.imag * response.imag
+        expected = torch.fft.irfft(torch.fft.rfft(padded.reshape(8, 502), n=512) * power, n=512)
+        expected = expected[:, 101:401].reshape(1, 1, 8, 300)
+        out = g._ntsc_fir_filter_rows(signal, cutoff, 101, g._NTSC_NYQUIST)
+        assert torch.equal(out, expected), cutoff
+        outputs.append(out)
+    assert not torch.equal(*outputs)
+
+    # The VHS bandwidths take effect
+    x = g.image_to_tensor(_image(128))
+
+    def vhs(**kw):
+        return g.ntsc_composite_pt(x, noise=0.0, enable_vhs=True, **kw)
+
+    assert float((vhs(vhs_luma_bw=1.5) - vhs(vhs_luma_bw=4.2)).abs().max()) > 0.05
+    assert float((vhs(color_under_bw=200.0) - vhs(color_under_bw=600.0)).abs().max()) > 0.05
+
+
+# ──────────────────────────────────────────────
 # Standalone runner
 # ──────────────────────────────────────────────
 
